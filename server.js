@@ -30,7 +30,8 @@ async function saveThesisToDrive(name, htmlContent) {
     scopes: ['https://www.googleapis.com/auth/drive.file'],
   });
   const drive = google.drive({ version: 'v3', auth });
-  const fileName = `${name.replace(/\s+/g, '_')}_Acquisition_Thesis_${new Date().toISOString().slice(0,10)}.html`;
+  const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const fileName = `${name.replace(/\s+/g, '_')}_${date}_Thesis Report.html`;
   const response = await drive.files.create({
     requestBody: {
       name: fileName,
