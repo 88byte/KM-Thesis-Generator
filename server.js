@@ -122,7 +122,7 @@ ${profile.extras ? 'Additional Notes: ' + profile.extras : ''}`;
   try {
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
-      max_tokens: 4000,
+      max_tokens: 8000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
@@ -131,7 +131,23 @@ ${profile.extras ? 'Additional Notes: ' + profile.extras : ''}`;
 
     // Strip any accidental markdown fences
     const clean = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-    const thesis = JSON.parse(clean);
+
+    let thesis;
+    try {
+      thesis = JSON.parse(clean);
+    } catch (parseErr) {
+      console.error('JSON parse failed, attempting repair. Length:', clean.length, 'Error:', parseErr.message);
+      let repaired = clean.replace(/,\s*$/, '');
+      const openObj = (repaired.match(/\{/g)||[]).length - (repaired.match(/\}/g)||[]).length;
+      const openArr = (repaired.match(/\[/g)||[]).length - (repaired.match(/\]/g)||[]).length;
+      repaired += ']'.repeat(Math.max(0, openArr)) + '}'.repeat(Math.max(0, openObj));
+      try {
+        thesis = JSON.parse(repaired);
+        console.log('JSON repair succeeded');
+      } catch (e2) {
+        return res.status(500).json({ error: 'The response was too long to process. Please try again.' });
+      }
+    }
 
     console.log('Thesis generated for', profile.name);
 
