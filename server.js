@@ -82,6 +82,32 @@ async function callClaude(system, user) {
 }
 
 // ── Google Drive ─────────────────────────────────────────────────────────────
+async function htmlToPdf(htmlContent) {
+  if (!process.env.PDFSHIFT_API_KEY) {
+    console.log('PDFSHIFT_API_KEY not set — skipping PDF conversion.');
+    return null;
+  }
+  const response = await fetch('https://api.pdfshift.io/v3/convert/pdf', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Basic ' + Buffer.from('api:' + process.env.PDFSHIFT_API_KEY).toString('base64'),
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      source: htmlContent,
+      landscape: false,
+      use_print: true,
+      margin: { top: '18mm', right: '18mm', bottom: '18mm', left: '18mm' }
+    })
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error('PDFShift error: ' + err);
+  }
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
 async function saveThesisToDrive(name, htmlContent) {
   if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.GOOGLE_REFRESH_TOKEN || !process.env.GOOGLE_DRIVE_FOLDER_ID) {
     console.log('Google Drive not configured — skipping.');
@@ -91,10 +117,35 @@ async function saveThesisToDrive(name, htmlContent) {
   oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
   const drive = google.drive({ version: 'v3', auth: oauth2Client });
   const date = new Date().toISOString().slice(0, 10);
-  const fileName = `${name.replace(/\s+/g, '_')}_${date}_Thesis Report.html`;
+
+  // Convert to PDF via PDFShift
+  let uploadBody = htmlContent;
+  let mimeType = 'text/html';
+  let ext = 'html';
+
+  try {
+    const pdfBuffer = await htmlToPdf(htmlContent);
+    if (pdfBuffer) {
+      uploadBody = pdfBuffer;
+      mimeType = 'application/pdf';
+      ext = 'pdf';
+      console.log('PDF generated via PDFShift (' + pdfBuffer.length + ' bytes)');
+    }
+  } catch (pdfErr) {
+    console.error('PDFShift failed, falling back to HTML:', pdfErr.message);
+  }
+
+  const fileName = `${name.replace(/\s+/g, '_')}_${date}_Thesis Report.${ext}`;
+
+  // For Buffer uploads we need a stream
+  const { Readable } = await import('stream');
+  const bodyStream = uploadBody instanceof Buffer
+    ? Readable.from(uploadBody)
+    : uploadBody;
+
   const response = await drive.files.create({
-    requestBody: { name: fileName, mimeType: 'text/html', parents: [process.env.GOOGLE_DRIVE_FOLDER_ID] },
-    media: { mimeType: 'text/html', body: htmlContent },
+    requestBody: { name: fileName, mimeType, parents: [process.env.GOOGLE_DRIVE_FOLDER_ID] },
+    media: { mimeType, body: bodyStream },
   });
   console.log('Saved to Drive:', fileName);
   return response.data.id;
@@ -287,68 +338,231 @@ Return this exact JSON structure:
 });
 
 function buildDriveHtml(name, t) {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${name} — Acquisition Thesis</title>
+  const firstName = name.split(' ')[0];
+  const today = new Date().toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>${name} — 100-Day Acquisition Roadmap</title>
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Montserrat:wght@400;500;600;700;800&family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-body{font-family:Georgia,serif;max-width:900px;margin:40px auto;color:#1a1a1a;line-height:1.7;padding:0 40px}
-h1{font-size:32px;margin-bottom:4px}
-h2{font-size:11px;letter-spacing:0.25em;text-transform:uppercase;color:#8B6914;margin-top:48px;border-bottom:2px solid #e8e0d0;padding-bottom:8px}
-h3{font-size:18px;margin:20px 0 8px}
-.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:#e8e0d0;border:1px solid #e8e0d0;margin:24px 0}
-.metric{background:#fff;padding:20px;text-align:center}
-.metric-val{font-size:20px;font-weight:700;color:#8B6914;display:block;margin-bottom:4px}
-.metric-lbl{font-size:10px;text-transform:uppercase;color:#888;letter-spacing:0.1em}
-table{width:100%;border-collapse:collapse;margin:20px 0;font-size:14px}
-th{background:#f5f0e8;padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:#8B6914;border-bottom:2px solid #e8e0d0}
-td{padding:11px 14px;border-bottom:1px solid #e8e0d0}
-.advantage{border-left:3px solid #C9A84C;padding:14px 18px;margin:12px 0;background:#fafaf5}
-.advantage-title{font-weight:700;font-size:13px;letter-spacing:0.05em;color:#8B6914;margin-bottom:4px}
-.phase{background:#f5f0e8;border-left:4px solid #C9A84C;padding:20px 24px;margin:20px 0}
-.phase-title{font-size:10px;letter-spacing:0.3em;text-transform:uppercase;color:#8B6914;font-weight:700;margin-bottom:8px}
-.script-box{background:#fffdf5;border:1px solid #e8e0d0;padding:20px 24px;margin:16px 0;white-space:pre-wrap;font-family:Georgia,serif;font-size:15px;line-height:1.7}
-.script-label{font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:#8B6914;font-weight:700;margin-bottom:10px}
-blockquote{border-left:4px solid #C9A84C;margin:32px 0;padding:16px 24px;background:#f5edd8;font-style:italic;font-size:17px}
-</style></head><body>
-<h1>${name}'s 100-Day Acquisition Roadmap</h1>
-<p style="color:#888;font-size:13px">Kyle Mallien · Elite Wealth Club · ${new Date().toLocaleDateString()}</p>
-<div class="metrics">
-<div class="metric"><span class="metric-val">${t.metrics?.revenue||''}</span><div class="metric-lbl">Target Revenue</div></div>
-<div class="metric"><span class="metric-val">${t.metrics?.margin||''}</span><div class="metric-lbl">Profit Margin</div></div>
-<div class="metric"><span class="metric-val">${t.metrics?.income||''}</span><div class="metric-lbl">Income Goal</div></div>
-<div class="metric"><span class="metric-val">${t.metrics?.timeline||''}</span><div class="metric-lbl">Timeline</div></div>
+@page { size: A4; margin: 18mm 20mm; }
+*, *::before, *::after { box-sizing: border-box; }
+body { font-family: 'Lora', Georgia, serif; font-size: 10.5pt; line-height: 1.75; color: #1A1714; background: #fff; margin: 0; }
+
+/* ── COVER ── */
+.cover { min-height: 100vh; display: flex; flex-direction: column; justify-content: space-between; padding: 60px 56px; background: #0E0E0E; color: #F0EAD6; page-break-after: always; }
+.cover-top {}
+.cover-eyebrow { font-family: 'Montserrat', sans-serif; font-size: 8pt; letter-spacing: 0.3em; text-transform: uppercase; color: #C9A84C; margin-bottom: 32px; }
+.cover-name { font-family: 'Cinzel', serif; font-size: 36pt; font-weight: 700; line-height: 1.05; color: #C9A84C; margin-bottom: 8px; }
+.cover-title { font-family: 'Lora', serif; font-size: 16pt; font-weight: 400; font-style: italic; color: rgba(240,234,214,0.7); margin-bottom: 6px; }
+.cover-sub { font-family: 'Montserrat', sans-serif; font-size: 9pt; color: rgba(240,234,214,0.4); letter-spacing: 0.1em; }
+.cover-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: rgba(201,168,76,0.2); border: 1px solid rgba(201,168,76,0.2); margin-top: 48px; }
+.cover-metric { background: rgba(255,255,255,0.04); padding: 18px 14px; text-align: center; }
+.cover-metric-val { font-family: 'Cinzel', serif; font-size: 14pt; font-weight: 600; color: #C9A84C; display: block; margin-bottom: 5px; }
+.cover-metric-lbl { font-family: 'Montserrat', sans-serif; font-size: 7pt; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(240,234,214,0.4); }
+.cover-fuel { font-family: 'Montserrat', sans-serif; font-size: 8pt; letter-spacing: 0.4em; color: rgba(201,168,76,0.35); text-transform: uppercase; margin-top: 24px; }
+.cover-conf { font-family: 'Montserrat', sans-serif; font-size: 7.5pt; color: rgba(240,234,214,0.25); letter-spacing: 0.1em; }
+
+/* ── TOC ── */
+.toc { padding: 48px 0; page-break-after: always; }
+.section-eyebrow { font-family: 'Montserrat', sans-serif; font-size: 7.5pt; letter-spacing: 0.3em; text-transform: uppercase; color: #8B6914; font-weight: 700; margin-bottom: 20px; padding-bottom: 8px; border-bottom: 2px solid #E8E0D0; }
+.toc-row { display: flex; align-items: baseline; padding: 7px 0; border-bottom: 1px solid #EEE8DC; }
+.toc-num { font-family: 'Cinzel', serif; font-size: 9pt; color: #8B6914; font-weight: 600; min-width: 32px; }
+.toc-label { font-family: 'Montserrat', sans-serif; font-size: 9.5pt; color: #3A3530; font-weight: 500; flex: 1; }
+
+/* ── SECTIONS ── */
+.section { margin-bottom: 36px; page-break-inside: avoid; }
+.section-header { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; padding-bottom: 10px; border-bottom: 2px solid #E8E0D0; }
+.section-num { font-family: 'Cinzel', serif; font-size: 9pt; color: #8B6914; font-weight: 600; min-width: 24px; }
+.section-title { font-family: 'Montserrat', sans-serif; font-size: 9pt; letter-spacing: 0.25em; text-transform: uppercase; color: #8B6914; font-weight: 700; }
+
+/* ── PROSE ── */
+p { margin: 0 0 12px; font-size: 10.5pt; line-height: 1.8; }
+
+/* ── CRITERIA GRID ── */
+.criteria { display: grid; grid-template-columns: repeat(3,1fr); gap: 1px; background: #E8E0D0; border: 1px solid #E8E0D0; margin: 16px 0; }
+.criteria-cell { background: #fff; padding: 14px; text-align: center; }
+.criteria-val { font-family: 'Cinzel', serif; font-size: 12pt; font-weight: 600; color: #8B6914; display: block; margin-bottom: 3px; }
+.criteria-lbl { font-family: 'Montserrat', sans-serif; font-size: 7pt; letter-spacing: 0.15em; text-transform: uppercase; color: #A09070; }
+
+/* ── ADVANTAGE CARDS ── */
+.advantage { border-left: 3px solid #C9A84C; padding: 12px 16px; margin: 10px 0; background: #FAFAF5; break-inside: avoid; }
+.advantage-title { font-family: 'Montserrat', sans-serif; font-size: 9pt; font-weight: 700; color: #8B6914; margin-bottom: 5px; letter-spacing: 0.05em; }
+.advantage-body { font-size: 10pt; line-height: 1.7; color: #3A3530; }
+
+/* ── TABLES ── */
+table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 9.5pt; break-inside: avoid; }
+thead th { background: #F0E8D5; padding: 9px 12px; text-align: left; font-family: 'Montserrat', sans-serif; font-size: 7.5pt; letter-spacing: 0.12em; text-transform: uppercase; color: #8B6914; font-weight: 700; border-bottom: 2px solid #D4C4A0; }
+tbody tr:nth-child(even) td { background: #FAFAF5; }
+tbody tr:last-child td { background: #F5EDD8; font-weight: 600; color: #6B4F10; }
+td { padding: 9px 12px; border-bottom: 1px solid #EEE8DC; color: #2A2520; line-height: 1.5; vertical-align: top; }
+
+/* ── ROADMAP PHASES ── */
+.phase { border: 1px solid #E8E0D0; margin-bottom: 20px; break-inside: avoid; page-break-inside: avoid; }
+.phase-header { background: #F0E8D5; padding: 12px 18px; display: flex; align-items: center; gap: 14px; border-bottom: 1px solid #E8E0D0; }
+.phase-letter { font-family: 'Cinzel', serif; font-size: 22pt; font-weight: 700; color: #8B6914; line-height: 1; min-width: 32px; }
+.phase-days { font-family: 'Montserrat', sans-serif; font-size: 7pt; letter-spacing: 0.2em; text-transform: uppercase; color: #A09070; font-weight: 700; }
+.phase-name { font-family: 'Montserrat', sans-serif; font-size: 9.5pt; font-weight: 700; color: #2A2520; }
+.phase-objective { padding: 10px 18px; font-size: 9.5pt; font-style: italic; color: #5A504A; border-bottom: 1px solid #E8E0D0; background: #FDFAF4; }
+.phase table { margin: 0; }
+.phase table thead th { font-size: 7pt; }
+.phase table td { font-size: 9.5pt; }
+
+/* ── SCRIPT BOXES ── */
+.script { border: 1px solid #E8E0D0; margin-bottom: 20px; break-inside: avoid; page-break-inside: avoid; }
+.script-label { background: #F0E8D5; padding: 9px 16px; font-family: 'Montserrat', sans-serif; font-size: 7.5pt; letter-spacing: 0.2em; text-transform: uppercase; color: #8B6914; font-weight: 700; border-bottom: 1px solid #E8E0D0; }
+.script-subject { padding: 8px 16px; font-family: 'Montserrat', sans-serif; font-size: 9pt; font-weight: 600; color: #3A3530; border-bottom: 1px solid #E8E0D0; background: #FAFAF5; }
+.script-subject span { color: #8B6914; }
+.script-body { padding: 16px 18px; font-size: 10pt; line-height: 1.85; color: #1A1714; white-space: pre-wrap; font-family: 'Lora', Georgia, serif; background: #fff; }
+
+/* ── CLOSING ── */
+.closing { border-left: 4px solid #C9A84C; padding: 16px 22px; background: #F5EDD8; margin: 32px 0; break-inside: avoid; }
+.closing p { font-size: 11pt; font-style: italic; line-height: 1.75; margin: 0; color: #2A2520; }
+
+/* ── FOOTER ── */
+.doc-footer { text-align: center; margin-top: 48px; padding-top: 16px; border-top: 1px solid #E8E0D0; font-family: 'Montserrat', sans-serif; font-size: 7.5pt; color: #B0A890; letter-spacing: 0.1em; }
+</style>
+</head>
+<body>
+
+<!-- COVER -->
+<div class="cover">
+  <div class="cover-top">
+    <div class="cover-eyebrow">F &nbsp;·&nbsp; U &nbsp;·&nbsp; E &nbsp;·&nbsp; L &nbsp;&nbsp;&nbsp; Elite Wealth Club · Carlsbad · ${today}</div>
+    <div class="cover-name">${name}</div>
+    <div class="cover-title">100-Day Acquisition Roadmap</div>
+    <div class="cover-sub">${t.metrics?.revenue || '$1M–$5M'} Target &nbsp;·&nbsp; ${t.metrics?.margin || '20%+'} Margins &nbsp;·&nbsp; Kyle Mallien Methodology</div>
+    <div class="cover-metrics">
+      <div class="cover-metric"><span class="cover-metric-val">${t.metrics?.revenue || '—'}</span><div class="cover-metric-lbl">Target Revenue</div></div>
+      <div class="cover-metric"><span class="cover-metric-val">${t.metrics?.margin || '—'}</span><div class="cover-metric-lbl">Profit Margin</div></div>
+      <div class="cover-metric"><span class="cover-metric-val">${t.metrics?.income || '—'}</span><div class="cover-metric-lbl">Income Goal</div></div>
+      <div class="cover-metric"><span class="cover-metric-val">${t.metrics?.timeline || '—'}</span><div class="cover-metric-lbl">Timeline</div></div>
+    </div>
+    <div class="cover-fuel">F · Find &nbsp;&nbsp;&nbsp; U · Underwrite &nbsp;&nbsp;&nbsp; E · Elevate &nbsp;&nbsp;&nbsp; L · Legacy</div>
+  </div>
+  <div class="cover-conf">Confidential · Prepared Exclusively for ${name} · Kyle Mallien · kylemallien.com · ${today}</div>
 </div>
-<h2>Thesis Overview</h2>${t.thesis_overview||''}
-<h2>Unfair Advantages</h2>${(t.unfair_advantages||[]).map(a=>`<div class="advantage"><div class="advantage-title">${a.title}</div><div>${a.body}</div></div>`).join('')}
-<h2>Target Verticals — Ranked by Fit</h2>
-<table><thead><tr><th>Rank</th><th>Vertical</th><th>Margin</th><th>Why It Fits</th></tr></thead><tbody>
-${(t.target_verticals||[]).map(v=>`<tr><td>#${v.rank}</td><td>${v.vertical}</td><td>${v.margin}</td><td>${v.why}</td></tr>`).join('')}
-</tbody></table>
-<h2>100-Day Roadmap</h2>
-${['days_1_30','days_31_70','days_71_100'].map((k,i)=>{const ph=t.roadmap?.[k];const labels=['F — FIND (Days 1–30)','U — UNDERWRITE (Days 31–70)','E+L — ELEVATE & LEGACY (Days 71–100)'];return ph?`<div class="phase"><div class="phase-title">${labels[i]}</div><p><em>${ph.objective}</em></p><table><thead><tr><th>Days</th><th>Action</th></tr></thead><tbody>${(ph.actions||[]).map(a=>`<tr><td style="white-space:nowrap;width:130px">${a.days}</td><td>${a.action}</td></tr>`).join('')}</tbody></table></div>`:''}).join('')}
-<h2>Outreach Scripts</h2>
-${Object.values(t.scripts||{}).map(s=>`<div class="script-label">${s.label}${s.subject?` — Subject: ${s.subject}`:''}</div><div class="script-box">${s.body}</div>`).join('')}
-<h2>Deal Structure</h2>
-<table><thead><tr><th>Component</th><th>Target</th><th>Purpose</th></tr></thead><tbody>
-${(t.deal_structure||[]).map(d=>`<tr><td>${d.component}</td><td>${d.target}</td><td>${d.purpose}</td></tr>`).join('')}
-</tbody></table>
-<h2>Valuation & Income Model</h2>
-<table><thead><tr><th>Revenue</th><th>EBITDA (20%)</th><th>EBITDA (25%)</th><th>Purchase @ 3x</th><th>Purchase @ 5x</th></tr></thead><tbody>
-${(t.valuation_model||[]).map(v=>`<tr><td>${v.revenue}</td><td>${v.ebitda_20}</td><td>${v.ebitda_25}</td><td>${v.at_3x}</td><td>${v.at_5x}</td></tr>`).join('')}
-</tbody></table>
-<h2>Value Creation Levers</h2>${(t.value_creation_levers||[]).map(l=>`<div class="advantage"><div class="advantage-title">${l.title}</div><div>${l.body}</div></div>`).join('')}
-<h2>SBA 7(a) Financing</h2>
-<table><thead><tr><th>Deal Size</th><th>Down (10%)</th><th>Seller Note (10%)</th><th>SBA Loan (80%)</th></tr></thead><tbody>
-${(t.sba_financing||[]).map(s=>`<tr><td>${s.deal_size}</td><td>${s.down_10}</td><td>${s.seller_note_10}</td><td>${s.sba_80}</td></tr>`).join('')}
-</tbody></table>
-<h2>Key Milestones</h2>
-<table><thead><tr><th>Day</th><th>Milestone</th></tr></thead><tbody>
-${(t.milestones||[]).map(m=>`<tr><td style="white-space:nowrap;width:80px">${m.day}</td><td>${m.milestone}</td></tr>`).join('')}
-</tbody></table>
-<h2>Immediate Next Steps</h2>
-<table><thead><tr><th>Timeframe</th><th>Action</th></tr></thead><tbody>
-${(t.next_steps||[]).map(n=>`<tr><td style="white-space:nowrap;width:100px">${n.timeframe}</td><td>${n.action}</td></tr>`).join('')}
-</tbody></table>
-<blockquote>${t.closing_insight||''}</blockquote>
-<p style="text-align:center;color:#aaa;font-size:11px;margin-top:48px;border-top:1px solid #eee;padding-top:16px">Confidential · Prepared Exclusively for ${name} · Kyle Mallien · kylemallien.com</p>
+
+<!-- TOC -->
+<div class="toc">
+  <div class="section-eyebrow">Table of Contents</div>
+  ${[['01','Thesis Overview'],['02','Acquisition Criteria'],['03','Your Unfair Advantages'],['04','Target Verticals — Ranked by Fit'],['05','100-Day Acquisition Roadmap'],['06','Outreach Scripts & Templates'],['07','Deal Structure Framework'],['08','Valuation & Income Model'],['09','Post-Acquisition Value Creation'],['10','SBA 7(a) Financing Path'],['11','Key Milestones & Success Metrics'],['12','Immediate Next Steps']].map(([n,l]) => `<div class="toc-row"><span class="toc-num">${n}</span><span class="toc-label">${l}</span></div>`).join('')}
+</div>
+
+<!-- 01 OVERVIEW -->
+<div class="section">
+  <div class="section-header"><span class="section-num">01</span><span class="section-title">Thesis Overview</span></div>
+  ${t.thesis_overview || ''}
+</div>
+
+<!-- 02 CRITERIA -->
+<div class="section">
+  <div class="section-header"><span class="section-num">02</span><span class="section-title">Acquisition Criteria</span></div>
+  <p>Every deal must pass Kyle's buy box before an LOI is submitted. These are the non-negotiables.</p>
+  <div class="criteria">
+    <div class="criteria-cell"><span class="criteria-val">$1M – $5M</span><div class="criteria-lbl">Target Revenue</div></div>
+    <div class="criteria-cell"><span class="criteria-val">20 – 30%</span><div class="criteria-lbl">Profit Margins</div></div>
+    <div class="criteria-cell"><span class="criteria-val">10+ Years</span><div class="criteria-lbl">Operating History</div></div>
+    <div class="criteria-cell"><span class="criteria-val">10+ Staff</span><div class="criteria-lbl">Team in Place</div></div>
+    <div class="criteria-cell"><span class="criteria-val">SBA 7(a)</span><div class="criteria-lbl">Financing Path</div></div>
+    <div class="criteria-cell"><span class="criteria-val">Ages 58–70</span><div class="criteria-lbl">Seller Profile</div></div>
+  </div>
+</div>
+
+<!-- 03 ADVANTAGES -->
+<div class="section">
+  <div class="section-header"><span class="section-num">03</span><span class="section-title">Your Unfair Advantages</span></div>
+  ${(t.unfair_advantages||[]).map(a => `<div class="advantage"><div class="advantage-title">${a.title}</div><div class="advantage-body">${a.body}</div></div>`).join('')}
+</div>
+
+<!-- 04 VERTICALS -->
+<div class="section">
+  <div class="section-header"><span class="section-num">04</span><span class="section-title">Target Verticals — Ranked by Fit</span></div>
+  <table><thead><tr><th>Rank</th><th>Vertical</th><th>Margin</th><th>Why It Fits</th></tr></thead><tbody>
+  ${(t.target_verticals||[]).map(v => `<tr><td style="font-family:'Cinzel',serif;color:#8B6914;font-weight:600">#${v.rank}</td><td><strong>${v.vertical}</strong></td><td>${v.margin}</td><td>${v.why}</td></tr>`).join('')}
+  </tbody></table>
+</div>
+
+<!-- 05 ROADMAP -->
+<div class="section">
+  <div class="section-header"><span class="section-num">05</span><span class="section-title">100-Day Acquisition Roadmap</span></div>
+  ${[
+    {key:'days_1_30', letter:'F', days:'Days 1–30', name:'FIND — Build Your Pipeline'},
+    {key:'days_31_70', letter:'U', days:'Days 31–70', name:'UNDERWRITE — Qualify, Discover & Structure'},
+    {key:'days_71_100', letter:'E+L', days:'Days 71–100', name:'ELEVATE & LEGACY — Close, Integrate & Build Wealth'}
+  ].map(p => {
+    const ph = (t.roadmap||{})[p.key];
+    return ph ? `<div class="phase">
+      <div class="phase-header"><div class="phase-letter">${p.letter}</div><div><div class="phase-days">${p.days}</div><div class="phase-name">${p.name}</div></div></div>
+      <div class="phase-objective">${ph.objective}</div>
+      <table><thead><tr><th style="width:120px">Days</th><th>Action</th></tr></thead><tbody>
+      ${(ph.actions||[]).map(a => `<tr><td style="font-weight:600;color:#8B6914;white-space:nowrap">${a.days}</td><td>${a.action}</td></tr>`).join('')}
+      </tbody></table></div>` : '';
+  }).join('')}
+</div>
+
+<!-- 06 SCRIPTS -->
+<div class="section">
+  <div class="section-header"><span class="section-num">06</span><span class="section-title">Outreach Scripts &amp; Templates</span></div>
+  ${Object.values(t.scripts||{}).map(s => `<div class="script">
+    <div class="script-label">${s.label}</div>
+    ${s.subject ? `<div class="script-subject"><span>Subject:</span> ${s.subject}</div>` : ''}
+    <div class="script-body">${s.body}</div>
+  </div>`).join('')}
+</div>
+
+<!-- 07 DEAL STRUCTURE -->
+<div class="section">
+  <div class="section-header"><span class="section-num">07</span><span class="section-title">Deal Structure Framework</span></div>
+  <table><thead><tr><th>Component</th><th>Target</th><th>Purpose</th></tr></thead><tbody>
+  ${(t.deal_structure||[]).map(d => `<tr><td><strong>${d.component}</strong></td><td>${d.target}</td><td>${d.purpose}</td></tr>`).join('')}
+  </tbody></table>
+</div>
+
+<!-- 08 VALUATION -->
+<div class="section">
+  <div class="section-header"><span class="section-num">08</span><span class="section-title">Valuation &amp; Income Model</span></div>
+  <table><thead><tr><th>Revenue</th><th>EBITDA (20%)</th><th>EBITDA (25%)</th><th>Purchase @ 3x</th><th>Purchase @ 5x</th></tr></thead><tbody>
+  ${(t.valuation_model||[]).map(v => `<tr><td>${v.revenue}</td><td>${v.ebitda_20}</td><td>${v.ebitda_25}</td><td>${v.at_3x}</td><td>${v.at_5x}</td></tr>`).join('')}
+  </tbody></table>
+</div>
+
+<!-- 09 LEVERS -->
+<div class="section">
+  <div class="section-header"><span class="section-num">09</span><span class="section-title">Post-Acquisition Value Creation</span></div>
+  ${(t.value_creation_levers||[]).map(l => `<div class="advantage"><div class="advantage-title">${l.title}</div><div class="advantage-body">${l.body}</div></div>`).join('')}
+</div>
+
+<!-- 10 SBA -->
+<div class="section">
+  <div class="section-header"><span class="section-num">10</span><span class="section-title">SBA 7(a) Financing Path</span></div>
+  <p>Most acquisitions in the $1–5M range qualify with 10–20% down. Seller carry (5–15%) further reduces equity required.</p>
+  <table><thead><tr><th>Deal Size</th><th>Down Payment (10%)</th><th>Seller Note (10%)</th><th>SBA Loan (80%)</th></tr></thead><tbody>
+  ${(t.sba_financing||[]).map(s => `<tr><td>${s.deal_size}</td><td>${s.down_10}</td><td>${s.seller_note_10}</td><td>${s.sba_80}</td></tr>`).join('')}
+  </tbody></table>
+</div>
+
+<!-- 11 MILESTONES -->
+<div class="section">
+  <div class="section-header"><span class="section-num">11</span><span class="section-title">Key Milestones &amp; Success Metrics</span></div>
+  <table><thead><tr><th>Milestone</th><th>Target</th></tr></thead><tbody>
+  ${(t.milestones||[]).map(m => `<tr><td style="font-weight:600;color:#8B6914;white-space:nowrap;width:80px">${m.day}</td><td>${m.milestone}</td></tr>`).join('')}
+  </tbody></table>
+</div>
+
+<!-- 12 NEXT STEPS -->
+<div class="section">
+  <div class="section-header"><span class="section-num">12</span><span class="section-title">Immediate Next Steps</span></div>
+  <table><thead><tr><th>Timeframe</th><th>Action</th></tr></thead><tbody>
+  ${(t.next_steps||[]).map(n => `<tr><td style="font-weight:600;color:#8B6914;white-space:nowrap;width:90px">${n.timeframe}</td><td>${n.action}</td></tr>`).join('')}
+  </tbody></table>
+</div>
+
+<!-- CLOSING -->
+<div class="closing"><p>${t.closing_insight||''}</p></div>
+
+<div class="doc-footer">Confidential · Prepared Exclusively for ${name} · Kyle Mallien · kylemallien.com · ${today}</div>
+
 </body></html>`;
 }
 
