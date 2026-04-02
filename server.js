@@ -37,6 +37,23 @@ function releaseSlot() {
   if (waitQueue.length > 0) { activeCount++; waitQueue.shift()(); }
 }
 
+// ── Stats Store ──────────────────────────────────────────────────────────────
+const SERVER_START = new Date();
+const stats = {
+  submitted: 0,
+  completed: 0,
+  failed: 0,
+  reports: [] // last 200 kept in memory
+};
+
+function recordSubmission(name) {
+  stats.submitted++;
+  const entry = { name, submittedAt: new Date(), status: 'queued', driveFileId: null, fileType: null, durationMs: null, error: null };
+  stats.reports.unshift(entry);
+  if (stats.reports.length > 200) stats.reports.pop();
+  return entry;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function safeParseJSON(raw) {
   const clean = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
@@ -54,19 +71,8 @@ async function callClaude(system, user) {
   return message.content.map(b => b.text || '').join('');
 }
 
-async function callClaudeWithRetry(system, user) {
-  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
-    try { return await callClaude(system, user); }
-    catch (err) {
-      const isRateLimit = err.status === 429 || (err.message && err.message.includes('rate'));
-      if (isRateLimit && attempt < RETRY_ATTEMPTS) {
-        const wait = RETRY_DELAY_MS * attempt;
-        console.log(`Rate limited — retrying in ${wait/1000}s (attempt ${attempt}/${RETRY_ATTEMPTS})`);
-        await new Promise(r => setTimeout(r, wait));
-      } else { throw err; }
-    }
-  }
-}
+// Retry is handled in the background block so the slot can be
+// released during backoff — keeping the queue moving for other attendees.
 
 // ── Google Drive ──────────────────────────────────────────────────────────────
 async function htmlToPdf(htmlContent) {
@@ -112,6 +118,7 @@ app.post('/generate-thesis', async (req, res) => {
   const profile = req.body;
   if (!profile || !profile.name) return res.status(400).json({ error: 'Missing profile data.' });
   console.log('Received request for:', profile.name);
+  const reportEntry = recordSubmission(profile.name);
 
   const profileBlock = `Name: ${profile.name}
 Profession: ${profile.profession}
@@ -247,22 +254,42 @@ Return this exact JSON structure:
   // Respond immediately so the thank-you page shows without waiting
   res.json({ queued: true, name: profile.name });
 
-  // Process in background with queue
+  // Process in background with queue + slot-aware retry
   (async () => {
     if (activeCount >= MAX_CONCURRENT) {
       console.log(`Queuing for ${profile.name} — position ${waitQueue.length + 1}`);
     }
-    await acquireSlot();
 
     let raw1, raw2;
-    try {
-      console.log(`Generating thesis for ${profile.name} (active: ${activeCount}/${MAX_CONCURRENT})`);
-      [raw1, raw2] = await Promise.all([
-        callClaudeWithRetry(system1, `Generate Call 1 JSON for this attendee:\n\n${profileBlock}`),
-        callClaudeWithRetry(system2, `Generate Call 2 JSON for this attendee:\n\n${profileBlock}`)
-      ]);
-    } finally {
-      releaseSlot();
+    for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+      await acquireSlot();
+      try {
+        reportEntry.status = 'generating';
+        reportEntry.startedAt = new Date();
+        console.log(`Generating thesis for ${profile.name} — attempt ${attempt} (active: ${activeCount}/${MAX_CONCURRENT})`);
+        [raw1, raw2] = await Promise.all([
+          callClaude(system1, `Generate Call 1 JSON for this attendee:\n\n${profileBlock}`),
+          callClaude(system2, `Generate Call 2 JSON for this attendee:\n\n${profileBlock}`)
+        ]);
+        releaseSlot();
+        break; // success — exit retry loop
+      } catch (err) {
+        releaseSlot(); // always free the slot before waiting
+        const isRateLimit = err.status === 429 || (err.message && err.message.includes('rate'));
+        if (isRateLimit && attempt < RETRY_ATTEMPTS) {
+          const wait = RETRY_DELAY_MS * attempt;
+          console.log(`Rate limited for ${profile.name} — slot released, retrying in ${wait/1000}s (attempt ${attempt}/${RETRY_ATTEMPTS})`);
+          await new Promise(r => setTimeout(r, wait));
+          // loop continues — reacquires slot after wait
+        } else {
+          console.error(`Generation failed for ${profile.name} after ${attempt} attempt(s):`, err.message);
+          reportEntry.status = 'failed';
+          reportEntry.error = err.message;
+          reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+          stats.failed++;
+          return; // give up
+        }
+      }
     }
 
     try {
@@ -272,9 +299,18 @@ Return this exact JSON structure:
       console.log('Thesis generated for', profile.name);
 
       const driveHtml = buildDriveHtml(profile.name, thesis);
-      await saveThesisToDrive(profile.name, driveHtml);
+      const driveFileId = await saveThesisToDrive(profile.name, driveHtml);
+      reportEntry.status = 'complete';
+      reportEntry.driveFileId = driveFileId;
+      reportEntry.fileType = process.env.PDFSHIFT_API_KEY ? 'pdf' : 'html';
+      reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+      stats.completed++;
     } catch (err) {
       console.error('Generation failed for', profile.name, ':', err.message);
+      reportEntry.status = 'failed';
+      reportEntry.error = err.message;
+      reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+      stats.failed++;
     }
   })();
 });
@@ -397,6 +433,33 @@ ${(t.next_steps||[]).map(n=>`<tr><td style="font-weight:600;color:#8B6914;white-
 }
 
 app.get('/health', (req, res) => res.json({ ok: true, timestamp: new Date().toISOString() }));
+
+app.get('/stats', (req, res) => {
+  const key = req.query.key || req.headers['x-admin-key'];
+  if (!process.env.ADMIN_KEY || key !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  res.json({
+    server: {
+      startedAt: SERVER_START.toISOString(),
+      uptimeSeconds: Math.floor((Date.now() - SERVER_START) / 1000),
+      driveConfigured: !!(process.env.GOOGLE_DRIVE_FOLDER_ID),
+      pdfshiftConfigured: !!(process.env.PDFSHIFT_API_KEY)
+    },
+    queue: {
+      active: activeCount,
+      waiting: waitQueue.length,
+      maxConcurrent: MAX_CONCURRENT
+    },
+    totals: {
+      submitted: stats.submitted,
+      completed: stats.completed,
+      failed: stats.failed,
+      pending: stats.submitted - stats.completed - stats.failed
+    },
+    reports: stats.reports
+  });
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
