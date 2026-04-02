@@ -19,9 +19,9 @@ app.use(express.json());
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ── Request Queue ─────────────────────────────────────────────────────────────
-const MAX_CONCURRENT = 3;
-const RETRY_ATTEMPTS = 3;
-const RETRY_DELAY_MS = 8000;
+const MAX_CONCURRENT = 1; // Tier 1: 40k TPM — one report at a time (~20k tokens each)
+const RETRY_ATTEMPTS = 4; // More retries since queue is tight
+const RETRY_DELAY_MS = 60000; // 60s — full TPM window recovery between retries
 let activeCount = 0;
 const waitQueue = [];
 
