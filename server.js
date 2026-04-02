@@ -19,16 +19,56 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function safeParseJSON(raw) {
-  const clean = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+  // Strip markdown fences
+  let clean = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+
+  // Fix literal newlines/tabs inside JSON string values (most common LLM mistake)
+  // Replace real newlines inside quoted strings with \n escape
+  clean = sanitizeJsonStrings(clean);
+
   try {
     return JSON.parse(clean);
-  } catch {
+  } catch (e1) {
+    console.error('First parse attempt failed:', e1.message.slice(0, 80));
+    // Try closing open structures
     let repaired = clean.replace(/,\s*$/, '');
     const openObj = (repaired.match(/\{/g)||[]).length - (repaired.match(/\}/g)||[]).length;
     const openArr = (repaired.match(/\[/g)||[]).length - (repaired.match(/\]/g)||[]).length;
     repaired += ']'.repeat(Math.max(0, openArr)) + '}'.repeat(Math.max(0, openObj));
-    return JSON.parse(repaired); // throws if still broken
+    return JSON.parse(repaired);
   }
+}
+
+function sanitizeJsonStrings(str) {
+  // Walk char by char — inside a JSON string, escape bare newlines/tabs/carriage returns
+  let result = '';
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (escape) {
+      result += c;
+      escape = false;
+      continue;
+    }
+    if (c === '\\') {
+      escape = true;
+      result += c;
+      continue;
+    }
+    if (c === '"') {
+      inString = !inString;
+      result += c;
+      continue;
+    }
+    if (inString) {
+      if (c === '\n') { result += '\\n'; continue; }
+      if (c === '\r') { result += '\\r'; continue; }
+      if (c === '\t') { result += '\\t'; continue; }
+    }
+    result += c;
+  }
+  return result;
 }
 
 async function callClaude(system, user) {
@@ -144,6 +184,8 @@ Return this exact JSON structure:
 
   // ── CALL 2: Scripts + tables ───────────────────────────────────────────────
   const system2 = `${baseInstruction}
+
+CRITICAL: All string values in the JSON must use \\n for line breaks. Never use real newline characters inside a JSON string value — that breaks JSON parsing.
 
 Return this exact JSON structure:
 {
