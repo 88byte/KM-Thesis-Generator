@@ -1,4 +1,5 @@
 import express from 'express';
+import { createClient } from '@supabase/supabase-js';
 import { jsonrepair } from 'jsonrepair';
 import cors from 'cors';
 import Anthropic from '@anthropic-ai/sdk';
@@ -17,6 +18,69 @@ app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
 app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ── Supabase ──────────────────────────────────────────────────────────────────
+const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY)
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+  : null;
+
+async function dbInsert(entry) {
+  if (!supabase) return null;
+  const { data, error } = await supabase.from('submissions').insert({
+    name:          entry.name,
+    submitted_at:  entry.submittedAt,
+    status:        entry.status
+  }).select('id').single();
+  if (error) { console.error('Supabase insert error:', error.message); return null; }
+  entry.dbId = data.id;
+  return data.id;
+}
+
+async function dbUpdate(entry) {
+  if (!supabase || !entry.dbId) return;
+  const patch = {
+    status:        entry.status,
+    started_at:    entry.startedAt   || null,
+    completed_at:  entry.completedAt || null,
+    file_type:     entry.fileType    || null,
+    duration_ms:   entry.durationMs  || null,
+    drive_file_id: entry.driveFileId || null,
+    error:         entry.error       || null
+  };
+  if (entry.thesisJson) patch.thesis_json = entry.thesisJson;
+  const { error } = await supabase.from('submissions').update(patch).eq('id', entry.dbId);
+  if (error) console.error('Supabase update error:', error.message);
+}
+
+async function seedFromSupabase() {
+  if (!supabase) return;
+  const { data, error } = await supabase
+    .from('submissions')
+    .select('*')
+    .order('submitted_at', { ascending: false })
+    .limit(200);
+  if (error) { console.error('Supabase seed error:', error.message); return; }
+  if (!data || data.length === 0) return;
+  // Restore stats counters
+  stats.submitted  = data.length;
+  stats.completed  = data.filter(r => r.status === 'complete').length;
+  stats.failed     = data.filter(r => r.status === 'failed').length;
+  // Restore report list into memory
+  stats.reports = data.map(r => ({
+    dbId:         r.id,
+    name:         r.name,
+    submittedAt:  r.submitted_at,
+    startedAt:    r.started_at,
+    completedAt:  r.completed_at,
+    status:       r.status,
+    fileType:     r.file_type,
+    durationMs:   r.duration_ms,
+    driveFileId:  r.drive_file_id,
+    thesisJson:   r.thesis_json || null,
+    error:        r.error
+  }));
+  console.log(`Seeded ${data.length} submissions from Supabase (${stats.completed} complete, ${stats.failed} failed)`);
+}
 
 // ── Request Queue ─────────────────────────────────────────────────────────────
 const MAX_CONCURRENT = 1; // Tier 1: 40k TPM — one report at a time (~20k tokens each)
@@ -48,9 +112,10 @@ const stats = {
 
 function recordSubmission(name) {
   stats.submitted++;
-  const entry = { name, submittedAt: new Date(), status: 'queued', driveFileId: null, fileType: null, durationMs: null, error: null };
+  const entry = { dbId: null, name, submittedAt: new Date(), status: 'queued', driveFileId: null, fileType: null, durationMs: null, error: null };
   stats.reports.unshift(entry);
   if (stats.reports.length > 200) stats.reports.pop();
+  dbInsert(entry); // fire-and-forget — doesn't block the response
   return entry;
 }
 
@@ -199,13 +264,31 @@ Return this exact JSON structure:
 
 CRITICAL: All string values in the JSON must use \\n for line breaks. Never use real newline characters inside a JSON string value — that breaks JSON parsing.
 
+SCRIPT DIRECTION: Every script must be written FROM ${firstName} (the buyer/attendee) TO an external party (a seller, broker, or business owner). These are outreach tools ${firstName} will use in the real world. Do NOT write them as if someone is writing to ${firstName}. ${firstName} is always the author sending the communication.
+
 Return this exact JSON structure:
 {
   "scripts": {
-    "ceo_letter": { "label": "CEO Personal Letter — Physical Mail", "subject": "", "body": "full personalized letter signed ${firstName}..." },
-    "email_followup": { "label": "Email Follow-Up — Day 7 After Letter", "subject": "Following up on my letter — [Business Name]", "body": "short follow-up signed ${firstName}..." },
-    "discovery_call": { "label": "Discovery Call Framework — 20 Minutes", "subject": "", "body": "OPENER (2 min): script...\\n\\nLEARN (8 min): questions...\\n\\nEDUCATE (6 min): script...\\n\\nCLOSE (4 min): script..." },
-    "seller_intro": { "label": "Seller Introduction to Customers — Joint Letter", "subject": "An important message about [Business Name]", "body": "joint letter from seller and ${firstName}..." }
+    "ceo_letter": {
+      "label": "Letter to Retiring Owner — Direct Mail",
+      "subject": "",
+      "body": "A warm, peer-to-peer physical letter written BY ${firstName} TO a retiring business owner in their target vertical. Tone: respectful, genuine, non-broker. ${firstName} introduces themselves, references their professional background and why they are specifically interested in this type of business, states they are selectively looking to acquire one well-run business to operate long-term, and invites a confidential 20-minute conversation. NO pressure. Signed: ${firstName} with a direct phone number line. Do NOT write this as Kyle writing to ${firstName} — this is ${firstName}'s outreach tool."
+    },
+    "email_followup": {
+      "label": "Email Follow-Up to Owner — Day 7",
+      "subject": "Following up on my letter — [Business Name]",
+      "body": "A short follow-up email written BY ${firstName} TO the same retiring owner, referencing the physical letter sent a week prior. Friendly, no pressure, offers a 20-minute call. Signed: ${firstName}. Again — this is FROM ${firstName} TO a seller, not from Kyle to ${firstName}."
+    },
+    "broker_outreach": {
+      "label": "Email to Business Broker — Introduction",
+      "subject": "Qualified Buyer — Seeking [vertical] business in [region]",
+      "body": "A professional introduction email written BY ${firstName} TO a business broker (e.g. Sunbelt, Murphy Business, local IBBA member). ${firstName} introduces themselves as a serious, pre-qualified buyer with SBA financing in process. Specifies their buy box clearly: service business, $1M–$5M revenue, 20%+ margins, 10+ years operating, retiring owner. Mentions their professional background as the value-add they bring. Requests to be added to the broker's buyer list and notified of relevant listings. Signed: ${firstName}."
+    },
+    "discovery_call": {
+      "label": "Discovery Call Script — 20 Minutes",
+      "subject": "",
+      "body": "A call script for ${firstName} to use when speaking with a seller who has responded to outreach. Written from ${firstName}'s perspective as the buyer.\n\nOPENER (2 min): ${firstName} thanks the owner for their time, establishes peer-to-peer tone, states the call is just a conversation with no pressure or obligation.\n\nLEARN (8 min): Questions ${firstName} asks the seller — about their timeline, whether they have a succession plan, what an ideal outcome looks like, how involved they are day-to-day.\n\nEDUCATE (6 min): ${firstName} briefly explains their acquisition approach — they are not a PE firm, they plan to operate and grow the business, retain the team, and honor the culture the owner built.\n\nCLOSE (4 min): ${firstName} asks if the seller would be comfortable sharing financials for a closer look. Everything is fully confidential."
+    }
   },
   "deal_structure": [
     {"component": "Cash at Close", "target": "60–70%", "purpose": "Gives seller certainty — competitive vs. broker deals"},
@@ -266,6 +349,7 @@ Return this exact JSON structure:
       try {
         reportEntry.status = 'generating';
         reportEntry.startedAt = new Date();
+        dbUpdate(reportEntry);
         console.log(`Generating thesis for ${profile.name} — attempt ${attempt} (active: ${activeCount}/${MAX_CONCURRENT})`);
         [raw1, raw2] = await Promise.all([
           callClaude(system1, `Generate Call 1 JSON for this attendee:\n\n${profileBlock}`),
@@ -287,6 +371,7 @@ Return this exact JSON structure:
           reportEntry.error = err.message;
           reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
           stats.failed++;
+          dbUpdate(reportEntry);
           return; // give up
         }
       }
@@ -301,16 +386,20 @@ Return this exact JSON structure:
       const driveHtml = buildDriveHtml(profile.name, thesis);
       const driveFileId = await saveThesisToDrive(profile.name, driveHtml);
       reportEntry.status = 'complete';
+      reportEntry.completedAt = new Date();
       reportEntry.driveFileId = driveFileId;
       reportEntry.fileType = process.env.PDFSHIFT_API_KEY ? 'pdf' : 'html';
       reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+      reportEntry.thesisJson = thesis; // stored in Supabase for regeneration
       stats.completed++;
+      dbUpdate(reportEntry);
     } catch (err) {
       console.error('Generation failed for', profile.name, ':', err.message);
       reportEntry.status = 'failed';
       reportEntry.error = err.message;
       reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
       stats.failed++;
+      dbUpdate(reportEntry);
     }
   })();
 });
@@ -407,7 +496,7 @@ ${(t.target_verticals||[]).map(v=>`<tr><td style="font-family:'Cinzel',serif;col
 </tbody></table></div>
 <div class="section"><div class="section-header"><span class="section-num">05</span><span class="section-title">100-Day Acquisition Roadmap</span></div>
 ${phaseConfig.map(p=>{const ph=(t.roadmap||{})[p.key];return ph?`<div class="phase"><div class="phase-header"><div class="phase-letter">${p.letter}</div><div><div class="phase-days">${p.days}</div><div class="phase-name">${p.name}</div></div></div><div class="phase-objective">${ph.objective}</div><table><thead><tr><th style="width:90px">Days</th><th>Action</th></tr></thead><tbody>${(ph.actions||[]).map(a=>`<tr><td style="font-weight:600;color:#8B6914;white-space:nowrap">${a.days}</td><td>${a.action}</td></tr>`).join('')}</tbody></table></div>`:''}).join('')}</div>
-<div class="section"><div class="section-header"><span class="section-num">06</span><span class="section-title">Outreach Scripts &amp; Templates</span></div>
+<div class="section"><div class="section-header"><span class="section-num">06</span><span class="section-title">Your Outreach Scripts — Ready to Send</span></div>
 ${Object.values(t.scripts||{}).map(s=>`<div class="script"><div class="script-label">${s.label}</div>${s.subject?`<div class="script-subject"><span>Subject:</span> ${s.subject}</div>`:''}<div class="script-body">${s.body}</div></div>`).join('')}</div>
 <div class="section"><div class="section-header"><span class="section-num">07</span><span class="section-title">Deal Structure Framework</span></div>
 <table><thead><tr><th style="width:120px">Component</th><th style="width:80px">Target</th><th>Purpose</th></tr></thead><tbody>
@@ -444,7 +533,8 @@ app.get('/stats', (req, res) => {
       startedAt: SERVER_START.toISOString(),
       uptimeSeconds: Math.floor((Date.now() - SERVER_START) / 1000),
       driveConfigured: !!(process.env.GOOGLE_DRIVE_FOLDER_ID),
-      pdfshiftConfigured: !!(process.env.PDFSHIFT_API_KEY)
+      pdfshiftConfigured: !!(process.env.PDFSHIFT_API_KEY),
+      supabaseConfigured: !!(supabase)
     },
     queue: {
       active: activeCount,
@@ -461,9 +551,70 @@ app.get('/stats', (req, res) => {
   });
 });
 
+// ── Admin: Regenerate PDF ────────────────────────────────────────────────────
+app.post('/regenerate/:id', async (req, res) => {
+  const key = req.query.key || req.headers['x-admin-key'];
+  if (!process.env.ADMIN_KEY || key !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+  const { data, error } = await supabase
+    .from('submissions')
+    .select('id, name, thesis_json')
+    .eq('id', req.params.id)
+    .single();
+
+  if (error || !data) return res.status(404).json({ error: 'Submission not found' });
+  if (!data.thesis_json) return res.status(400).json({ error: 'No thesis JSON stored for this submission — was generated before Supabase integration' });
+
+  try {
+    console.log('Regenerating PDF for:', data.name);
+    const driveHtml = buildDriveHtml(data.name, data.thesis_json);
+    const driveFileId = await saveThesisToDrive(data.name, driveHtml);
+
+    // Update the DB record with the new drive file id
+    await supabase.from('submissions').update({ drive_file_id: driveFileId }).eq('id', data.id);
+
+    // Update in-memory record too if it exists
+    const inMem = stats.reports.find(r => r.dbId === data.id);
+    if (inMem) inMem.driveFileId = driveFileId;
+
+    res.json({ ok: true, driveFileId, name: data.name });
+  } catch (err) {
+    console.error('Regenerate failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Admin: View report as HTML in browser ────────────────────────────────────
+app.get('/view/:id', async (req, res) => {
+  const key = req.query.key || req.headers['x-admin-key'];
+  if (!process.env.ADMIN_KEY || key !== process.env.ADMIN_KEY) {
+    return res.status(401).send('<h2>Unauthorized</h2>');
+  }
+  if (!supabase) return res.status(503).send('<h2>Supabase not configured</h2>');
+
+  const { data, error } = await supabase
+    .from('submissions')
+    .select('name, thesis_json, submitted_at')
+    .eq('id', req.params.id)
+    .single();
+
+  if (error || !data) return res.status(404).send('<h2>Report not found</h2>');
+  if (!data.thesis_json) return res.status(400).send('<h2>No thesis data stored for this report</h2>');
+
+  // Return the full styled HTML report
+  const html = buildDriveHtml(data.name, data.thesis_json);
+  res.setHeader('Content-Type', 'text/html');
+  res.send(html);
+});
+
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log('Kyle Mallien Thesis API running on port', PORT);
   console.log('ANTHROPIC_API_KEY:', process.env.ANTHROPIC_API_KEY ? 'SET' : 'MISSING');
-  console.log('Google Drive:', process.env.GOOGLE_DRIVE_FOLDER_ID ? 'configured' : 'not configured');
+  console.log('Google Drive:     ', process.env.GOOGLE_DRIVE_FOLDER_ID ? 'configured' : 'not configured');
+  console.log('Supabase:         ', supabase ? 'configured' : 'not configured — stats will not persist');
+  if (supabase) await seedFromSupabase();
 });
