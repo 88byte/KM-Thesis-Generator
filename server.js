@@ -303,21 +303,6 @@ app.post('/generate-thesis', async (req, res) => {
   console.log('Received request for:', profile.name);
   const reportEntry = recordSubmission(profile.name, profile);
 
-  const profileBlock = `Name: ${profile.name}
-Profession: ${profile.profession}
-Location: ${profile.location}
-Capital Available: ${profile.capital}
-Income Goal: ${profile.income}
-Unique Edge: ${profile.edge}
-Business Ownership History: ${profile.owned}
-Target Categories: ${profile.categories.join(', ')}
-Timeline: ${profile.timeline}
-Debt Comfort: ${profile.debt}
-Geographic Focus: ${profile.geo}
-Motivation: ${profile.motivation}
-Biggest Obstacle: ${profile.obstacle}
-${profile.extras ? 'Additional Notes: ' + profile.extras : ''}`;
-
   const firstName = profile.name.split(' ')[0];
   const baseInstruction = `You are Kyle Mallien's senior acquisition strategist. Kyle is an INC 5000 entrepreneur and acquisition mentor. His methodology: F.U.E.L. (Find, Underwrite, Elevate, Legacy). Buy box: service-based, recession-proof, 10+ years operating, 10+ employees, $1M–$5M revenue, 20%+ margins, SBA 7(a), retiring founder ages 58–70. Return ONLY raw JSON — no markdown, no backticks, no preamble. Be hyper-specific to ${firstName}'s profile in every field.`;
   const { system1, system2 } = buildPrompts(firstName, baseInstruction);
