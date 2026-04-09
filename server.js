@@ -33,7 +33,8 @@ async function dbInsert(entry) {
     name:          entry.name,
     submitted_at:  entry.submittedAt,
     status:        entry.status,
-    event_tag:     entry.eventTag
+    event_tag:     entry.eventTag,
+    profile_json:  entry.profileJson || null
   }).select('id').single();
   if (error) { console.error('Supabase insert error:', error.message); return null; }
   entry.dbId = data.id;
@@ -80,12 +81,39 @@ async function seedFromSupabase() {
     fileType:     r.file_type,
     durationMs:   r.duration_ms,
     driveFileId:  r.drive_file_id,
-    thesisJson:   r.thesis_json || null,
+    thesisJson:   r.thesis_json  || null,
+    profileJson:  r.profile_json || null,
     eventTag:     r.event_tag    || null,
     email:        r.email        || null,
     emailSentAt:  r.email_sent_at|| null,
     error:        r.error
   }));
+  // Re-queue any jobs interrupted by the restart
+  const interrupted = data.filter(r => r.status === 'queued' || r.status === 'generating');
+  if (interrupted.length > 0) {
+    console.log(`Re-queuing ${interrupted.length} interrupted submission(s)...`);
+    for (const r of interrupted) {
+      if (!r.profile_json) {
+        console.log(`  Skipping ${r.name} — no profile_json stored (pre-dates durable queue)`);
+        await supabase.from('submissions').update({ status: 'failed', error: 'Interrupted by server restart — profile not stored' }).eq('id', r.id);
+        const inMem = stats.reports.find(m => m.dbId === r.id);
+        if (inMem) { inMem.status = 'failed'; inMem.error = 'Interrupted — profile not stored'; }
+        stats.failed++;
+        continue;
+      }
+      const entry = stats.reports.find(m => m.dbId === r.id);
+      if (entry && r.profile_json) {
+        entry.status = 'queued';
+        const p = r.profile_json;
+        const firstName = p.name.split(' ')[0];
+        const baseInstruction = `You are Kyle Mallien's senior acquisition strategist. Kyle is an INC 5000 entrepreneur and acquisition mentor. His methodology: F.U.E.L. (Find, Underwrite, Elevate, Legacy). Buy box: service-based, recession-proof, 10+ years operating, 10+ employees, $1M–$5M revenue, 20%+ margins, SBA 7(a), retiring founder ages 58–70. Return ONLY raw JSON — no markdown, no backticks, no preamble. Be hyper-specific to ${firstName}'s profile in every field.`;
+        const { system1, system2 } = buildPrompts(firstName, baseInstruction);
+        const profileBlock = `Name: ${p.name}\nProfession: ${p.profession}\nLocation: ${p.location}\nCapital Available: ${p.capital}\nIncome Goal: ${p.income}\nUnique Edge: ${p.edge}\nBusiness Ownership History: ${p.owned}\nTarget Categories: ${(p.categories||[]).join(', ')}\nTimeline: ${p.timeline}\nDebt Comfort: ${p.debt}\nGeographic Focus: ${p.geo}\nMotivation: ${p.motivation}\nBiggest Obstacle: ${p.obstacle}${p.extras ? '\nAdditional Notes: ' + p.extras : ''}`;
+        runGeneration(entry, p, system1, system2, profileBlock);
+        console.log(`  Re-queued: ${r.name}`);
+      }
+    }
+  }
   console.log(`Seeded ${data.length} submissions from Supabase (${stats.completed} complete, ${stats.failed} failed)`);
 }
 
@@ -117,14 +145,14 @@ const stats = {
   reports: [] // last 200 kept in memory
 };
 
-function recordSubmission(name) {
+function recordSubmission(name, profile) {
   stats.submitted++;
   const d = new Date();
   const eventTag = d.toLocaleString('en-US', { month: 'long', year: 'numeric' }).toUpperCase();
-  const entry = { dbId: null, name, submittedAt: d, eventTag, status: 'queued', email: null, emailSentAt: null, driveFileId: null, fileType: null, durationMs: null, error: null };
+  const entry = { dbId: null, name, submittedAt: d, eventTag, profileJson: profile, status: 'queued', email: null, emailSentAt: null, driveFileId: null, fileType: null, durationMs: null, error: null };
   stats.reports.unshift(entry);
   if (stats.reports.length > 200) stats.reports.pop();
-  dbInsert(entry); // fire-and-forget — doesn't block the response
+  dbInsert(entry); // fire-and-forget
   return entry;
 }
 
@@ -187,31 +215,8 @@ async function saveThesisToDrive(name, htmlContent) {
   return response.data.id;
 }
 
-// ── Main route ────────────────────────────────────────────────────────────────
-app.post('/generate-thesis', async (req, res) => {
-  const profile = req.body;
-  if (!profile || !profile.name) return res.status(400).json({ error: 'Missing profile data.' });
-  console.log('Received request for:', profile.name);
-  const reportEntry = recordSubmission(profile.name);
-
-  const profileBlock = `Name: ${profile.name}
-Profession: ${profile.profession}
-Location: ${profile.location}
-Capital Available: ${profile.capital}
-Income Goal: ${profile.income}
-Unique Edge: ${profile.edge}
-Business Ownership History: ${profile.owned}
-Target Categories: ${profile.categories.join(', ')}
-Timeline: ${profile.timeline}
-Debt Comfort: ${profile.debt}
-Geographic Focus: ${profile.geo}
-Motivation: ${profile.motivation}
-Biggest Obstacle: ${profile.obstacle}
-${profile.extras ? 'Additional Notes: ' + profile.extras : ''}`;
-
-  const firstName = profile.name.split(' ')[0];
-  const baseInstruction = `You are Kyle Mallien's senior acquisition strategist. Kyle is an INC 5000 entrepreneur and acquisition mentor. His methodology: F.U.E.L. (Find, Underwrite, Elevate, Legacy). Buy box: service-based, recession-proof, 10+ years operating, 10+ employees, $1M–$5M revenue, 20%+ margins, SBA 7(a), retiring founder ages 58–70. Return ONLY raw JSON — no markdown, no backticks, no preamble. Be hyper-specific to ${firstName}'s profile in every field.`;
-
+// ── Prompt builder — used by both fresh and re-queued generations ────────────
+function buildPrompts(firstName, baseInstruction) {
   const system1 = `${baseInstruction}
 
 Return this exact JSON structure:
@@ -232,72 +237,25 @@ Return this exact JSON structure:
     {"rank": 5, "vertical": "...", "margin": "X–Y%", "why": "..."}
   ],
   "roadmap": {
-    "days_1_30": {
-      "objective": "one sentence...",
-      "actions": [
-        {"days": "Days 1–5", "action": "..."},
-        {"days": "Days 5–10", "action": "..."},
-        {"days": "Days 10–15", "action": "..."},
-        {"days": "Days 15–20", "action": "..."},
-        {"days": "Days 20–25", "action": "..."},
-        {"days": "Days 25–30", "action": "..."}
-      ]
-    },
-    "days_31_70": {
-      "objective": "one sentence...",
-      "actions": [
-        {"days": "Days 31–40", "action": "..."},
-        {"days": "Days 40–50", "action": "..."},
-        {"days": "Days 45–55", "action": "..."},
-        {"days": "Days 50–60", "action": "..."},
-        {"days": "Days 55–65", "action": "..."},
-        {"days": "Days 60–70", "action": "..."}
-      ]
-    },
-    "days_71_100": {
-      "objective": "one sentence...",
-      "actions": [
-        {"days": "Days 71–80", "action": "..."},
-        {"days": "Days 78–85", "action": "..."},
-        {"days": "Day 85", "action": "CLOSE — wire funds, transfer ownership, begin Day 1 integration"},
-        {"days": "Week 1 Post-Close", "action": "..."},
-        {"days": "Week 2 Post-Close", "action": "..."},
-        {"days": "Month 1 Post-Close", "action": "..."}
-      ]
-    }
+    "days_1_30": { "objective": "one sentence...", "actions": [{"days": "Days 1–5", "action": "..."},{"days": "Days 5–10", "action": "..."},{"days": "Days 10–15", "action": "..."},{"days": "Days 15–20", "action": "..."},{"days": "Days 20–25", "action": "..."},{"days": "Days 25–30", "action": "..."}] },
+    "days_31_70": { "objective": "one sentence...", "actions": [{"days": "Days 31–40", "action": "..."},{"days": "Days 40–50", "action": "..."},{"days": "Days 45–55", "action": "..."},{"days": "Days 50–60", "action": "..."},{"days": "Days 55–65", "action": "..."},{"days": "Days 60–70", "action": "..."}] },
+    "days_71_100": { "objective": "one sentence...", "actions": [{"days": "Days 71–80", "action": "..."},{"days": "Days 78–85", "action": "..."},{"days": "Day 85", "action": "CLOSE — wire funds, transfer ownership, begin Day 1 integration"},{"days": "Week 1 Post-Close", "action": "..."},{"days": "Week 2 Post-Close", "action": "..."},{"days": "Month 1 Post-Close", "action": "..."}] }
   },
   "closing_insight": "one powerful paragraph..."
 }`;
 
   const system2 = `${baseInstruction}
 
-CRITICAL: All string values in the JSON must use \\n for line breaks. Never use real newline characters inside a JSON string value — that breaks JSON parsing.
-
-SCRIPT DIRECTION: Every script must be written FROM ${firstName} (the buyer/attendee) TO an external party (a seller, broker, or business owner). These are outreach tools ${firstName} will use in the real world. Do NOT write them as if someone is writing to ${firstName}. ${firstName} is always the author sending the communication.
+CRITICAL: All string values in the JSON must use \n for line breaks. Never use real newline characters inside a JSON string value.
+SCRIPT DIRECTION: Every script must be written FROM ${firstName} (the buyer/attendee) TO an external party (a seller, broker, or business owner).
 
 Return this exact JSON structure:
 {
   "scripts": {
-    "ceo_letter": {
-      "label": "Letter to Retiring Owner — Direct Mail",
-      "subject": "",
-      "body": "A warm, peer-to-peer physical letter written BY ${firstName} TO a retiring business owner in their target vertical. Tone: respectful, genuine, non-broker. ${firstName} introduces themselves, references their professional background and why they are specifically interested in this type of business, states they are selectively looking to acquire one well-run business to operate long-term, and invites a confidential 20-minute conversation. NO pressure. Signed: ${firstName} with a direct phone number line. Do NOT write this as Kyle writing to ${firstName} — this is ${firstName}'s outreach tool."
-    },
-    "email_followup": {
-      "label": "Email Follow-Up to Owner — Day 7",
-      "subject": "Following up on my letter — [Business Name]",
-      "body": "A short follow-up email written BY ${firstName} TO the same retiring owner, referencing the physical letter sent a week prior. Friendly, no pressure, offers a 20-minute call. Signed: ${firstName}. Again — this is FROM ${firstName} TO a seller, not from Kyle to ${firstName}."
-    },
-    "broker_outreach": {
-      "label": "Email to Business Broker — Introduction",
-      "subject": "Qualified Buyer — Seeking [vertical] business in [region]",
-      "body": "A professional introduction email written BY ${firstName} TO a business broker (e.g. Sunbelt, Murphy Business, local IBBA member). ${firstName} introduces themselves as a serious, pre-qualified buyer with SBA financing in process. Specifies their buy box clearly: service business, $1M–$5M revenue, 20%+ margins, 10+ years operating, retiring owner. Mentions their professional background as the value-add they bring. Requests to be added to the broker's buyer list and notified of relevant listings. Signed: ${firstName}."
-    },
-    "discovery_call": {
-      "label": "Discovery Call Script — 20 Minutes",
-      "subject": "",
-      "body": "A call script for ${firstName} to use when speaking with a seller who has responded to outreach. Written from ${firstName}'s perspective as the buyer.\n\nOPENER (2 min): ${firstName} thanks the owner for their time, establishes peer-to-peer tone, states the call is just a conversation with no pressure or obligation.\n\nLEARN (8 min): Questions ${firstName} asks the seller — about their timeline, whether they have a succession plan, what an ideal outcome looks like, how involved they are day-to-day.\n\nEDUCATE (6 min): ${firstName} briefly explains their acquisition approach — they are not a PE firm, they plan to operate and grow the business, retain the team, and honor the culture the owner built.\n\nCLOSE (4 min): ${firstName} asks if the seller would be comfortable sharing financials for a closer look. Everything is fully confidential."
-    }
+    "ceo_letter": { "label": "Letter to Retiring Owner — Direct Mail", "subject": "", "body": "A warm peer-to-peer letter written BY ${firstName} TO a retiring business owner in their target vertical. References their professional background. Invites confidential 20-minute conversation. Signed: ${firstName}." },
+    "email_followup": { "label": "Email Follow-Up to Owner — Day 7", "subject": "Following up on my letter — [Business Name]", "body": "Short follow-up email written BY ${firstName} TO the retiring owner referencing the physical letter. No pressure. Signed: ${firstName}." },
+    "broker_outreach": { "label": "Email to Business Broker — Introduction", "subject": "Qualified Buyer — Seeking [vertical] business in [region]", "body": "Professional introduction email written BY ${firstName} TO a business broker. States buy box clearly. Mentions SBA pre-qualification. Requests to be added to buyer list. Signed: ${firstName}." },
+    "discovery_call": { "label": "Discovery Call Script — 20 Minutes", "subject": "", "body": "Call script for ${firstName} to use when speaking with a seller.\n\nOPENER (2 min): ${firstName} thanks owner, establishes peer tone, no pressure.\n\nLEARN (8 min): Questions ${firstName} asks about seller timeline, succession plan, ideal outcome, owner involvement.\n\nEDUCATE (6 min): ${firstName} explains approach — not PE, will operate and grow, retain team, honor culture.\n\nCLOSE (4 min): ${firstName} asks seller to share financials for a closer look. Fully confidential." }
   },
   "deal_structure": [
     {"component": "Cash at Close", "target": "60–70%", "purpose": "Gives seller certainty — competitive vs. broker deals"},
@@ -326,92 +284,125 @@ Return this exact JSON structure:
     {"deal_size": "$5,000,000", "down_10": "$500,000", "seller_note_10": "$500,000", "sba_80": "$4,000,000"}
   ],
   "milestones": [
-    {"day": "Day 30", "milestone": "..."},
-    {"day": "Day 45", "milestone": "..."},
-    {"day": "Day 60", "milestone": "..."},
-    {"day": "Day 75", "milestone": "..."},
-    {"day": "Day 90", "milestone": "..."},
-    {"day": "Day 100", "milestone": "..."}
+    {"day": "Day 30", "milestone": "..."},{"day": "Day 45", "milestone": "..."},{"day": "Day 60", "milestone": "..."},
+    {"day": "Day 75", "milestone": "..."},{"day": "Day 90", "milestone": "..."},{"day": "Day 100", "milestone": "..."}
   ],
   "next_steps": [
-    {"timeframe": "This Week", "action": "..."},
-    {"timeframe": "Week 2", "action": "..."},
-    {"timeframe": "Week 3", "action": "..."},
-    {"timeframe": "Week 4", "action": "..."},
-    {"timeframe": "Month 2", "action": "..."},
-    {"timeframe": "Month 3", "action": "..."}
+    {"timeframe": "This Week", "action": "..."},{"timeframe": "Week 2", "action": "..."},
+    {"timeframe": "Week 3", "action": "..."},{"timeframe": "Week 4", "action": "..."},
+    {"timeframe": "Month 2", "action": "..."},{"timeframe": "Month 3", "action": "..."}
   ]
 }`;
+  return { system1, system2 };
+}
 
-  // Respond immediately so the thank-you page shows without waiting
+// ── Main route ────────────────────────────────────────────────────────────────
+app.post('/generate-thesis', async (req, res) => {
+  const profile = req.body;
+  if (!profile || !profile.name) return res.status(400).json({ error: 'Missing profile data.' });
+  console.log('Received request for:', profile.name);
+  const reportEntry = recordSubmission(profile.name, profile);
+
+  const profileBlock = `Name: ${profile.name}
+Profession: ${profile.profession}
+Location: ${profile.location}
+Capital Available: ${profile.capital}
+Income Goal: ${profile.income}
+Unique Edge: ${profile.edge}
+Business Ownership History: ${profile.owned}
+Target Categories: ${profile.categories.join(', ')}
+Timeline: ${profile.timeline}
+Debt Comfort: ${profile.debt}
+Geographic Focus: ${profile.geo}
+Motivation: ${profile.motivation}
+Biggest Obstacle: ${profile.obstacle}
+${profile.extras ? 'Additional Notes: ' + profile.extras : ''}`;
+
+  const firstName = profile.name.split(' ')[0];
+  const baseInstruction = `You are Kyle Mallien's senior acquisition strategist. Kyle is an INC 5000 entrepreneur and acquisition mentor. His methodology: F.U.E.L. (Find, Underwrite, Elevate, Legacy). Buy box: service-based, recession-proof, 10+ years operating, 10+ employees, $1M–$5M revenue, 20%+ margins, SBA 7(a), retiring founder ages 58–70. Return ONLY raw JSON — no markdown, no backticks, no preamble. Be hyper-specific to ${firstName}'s profile in every field.`;
+  const { system1, system2 } = buildPrompts(firstName, baseInstruction);
+  const profileBlock = `Name: ${profile.name}
+Profession: ${profile.profession}
+Location: ${profile.location}
+Capital Available: ${profile.capital}
+Income Goal: ${profile.income}
+Unique Edge: ${profile.edge}
+Business Ownership History: ${profile.owned}
+Target Categories: ${profile.categories.join(', ')}
+Timeline: ${profile.timeline}
+Debt Comfort: ${profile.debt}
+Geographic Focus: ${profile.geo}
+Motivation: ${profile.motivation}
+Biggest Obstacle: ${profile.obstacle}
+${profile.extras ? 'Additional Notes: ' + profile.extras : ''}`;
+
+    // Respond immediately so the thank-you page shows without waiting
   res.json({ queued: true, name: profile.name });
 
-  // Process in background with queue + slot-aware retry
-  (async () => {
-    if (activeCount >= MAX_CONCURRENT) {
-      console.log(`Queuing for ${profile.name} — position ${waitQueue.length + 1}`);
-    }
+  runGeneration(reportEntry, profile, system1, system2, profileBlock);
+});
 
-    let raw1, raw2;
-    for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
-      await acquireSlot();
-      try {
-        reportEntry.status = 'generating';
-        reportEntry.startedAt = new Date();
+// ── Core generation runner — also called on restart re-queue ─────────────────
+async function runGeneration(reportEntry, profile, system1, system2, profileBlock) {
+  if (activeCount >= MAX_CONCURRENT) {
+    console.log(`Queuing for ${reportEntry.name} — position ${waitQueue.length + 1}`);
+  }
+  let raw1, raw2;
+  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+    await acquireSlot();
+    try {
+      console.log(`Generating thesis for ${reportEntry.name} — attempt ${attempt} (active: ${activeCount}/${MAX_CONCURRENT})`);
+      reportEntry.status = 'generating';
+      reportEntry.startedAt = new Date();
+      dbUpdate(reportEntry);
+      [raw1, raw2] = await Promise.all([
+        callClaude(system1, `Generate Call 1 JSON for this attendee:\n\n${profileBlock}`),
+        callClaude(system2, `Generate Call 2 JSON for this attendee:\n\n${profileBlock}`)
+      ]);
+      releaseSlot();
+      break;
+    } catch (err) {
+      releaseSlot();
+      const isRateLimit = err.status === 429 || (err.message && err.message.includes('rate'));
+      if (isRateLimit && attempt < RETRY_ATTEMPTS) {
+        const wait = RETRY_DELAY_MS * attempt;
+        console.log(`Rate limited for ${reportEntry.name} — retrying in ${wait/1000}s (attempt ${attempt}/${RETRY_ATTEMPTS})`);
+        await new Promise(r => setTimeout(r, wait));
+      } else {
+        console.error(`Generation failed for ${reportEntry.name} after ${attempt} attempt(s):`, err.message);
+        reportEntry.status = 'failed';
+        reportEntry.error = err.message;
+        reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+        stats.failed++;
         dbUpdate(reportEntry);
-        console.log(`Generating thesis for ${profile.name} — attempt ${attempt} (active: ${activeCount}/${MAX_CONCURRENT})`);
-        [raw1, raw2] = await Promise.all([
-          callClaude(system1, `Generate Call 1 JSON for this attendee:\n\n${profileBlock}`),
-          callClaude(system2, `Generate Call 2 JSON for this attendee:\n\n${profileBlock}`)
-        ]);
-        releaseSlot();
-        break; // success — exit retry loop
-      } catch (err) {
-        releaseSlot(); // always free the slot before waiting
-        const isRateLimit = err.status === 429 || (err.message && err.message.includes('rate'));
-        if (isRateLimit && attempt < RETRY_ATTEMPTS) {
-          const wait = RETRY_DELAY_MS * attempt;
-          console.log(`Rate limited for ${profile.name} — slot released, retrying in ${wait/1000}s (attempt ${attempt}/${RETRY_ATTEMPTS})`);
-          await new Promise(r => setTimeout(r, wait));
-          // loop continues — reacquires slot after wait
-        } else {
-          console.error(`Generation failed for ${profile.name} after ${attempt} attempt(s):`, err.message);
-          reportEntry.status = 'failed';
-          reportEntry.error = err.message;
-          reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
-          stats.failed++;
-          dbUpdate(reportEntry);
-          return; // give up
-        }
+        return;
       }
     }
-
-    try {
-      const part1 = safeParseJSON(raw1);
-      const part2 = safeParseJSON(raw2);
-      const thesis = { ...part1, ...part2 };
-      console.log('Thesis generated for', profile.name);
-
-      const driveHtml = buildDriveHtml(profile.name, thesis);
-      const driveFileId = await saveThesisToDrive(profile.name, driveHtml);
-      reportEntry.status = 'complete';
-      reportEntry.completedAt = new Date();
-      reportEntry.driveFileId = driveFileId;
-      reportEntry.fileType = process.env.PDFSHIFT_API_KEY ? 'pdf' : 'html';
-      reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
-      reportEntry.thesisJson = thesis; // stored in Supabase for regeneration
-      stats.completed++;
-      dbUpdate(reportEntry);
-    } catch (err) {
-      console.error('Generation failed for', profile.name, ':', err.message);
-      reportEntry.status = 'failed';
-      reportEntry.error = err.message;
-      reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
-      stats.failed++;
-      dbUpdate(reportEntry);
-    }
-  })();
-});
+  }
+  try {
+    const part1 = safeParseJSON(raw1);
+    const part2 = safeParseJSON(raw2);
+    const thesis = { ...part1, ...part2 };
+    console.log('Thesis generated for', reportEntry.name);
+    const driveHtml = buildDriveHtml(reportEntry.name, thesis);
+    const driveFileId = await saveThesisToDrive(reportEntry.name, driveHtml);
+    reportEntry.status = 'complete';
+    reportEntry.completedAt = new Date();
+    reportEntry.driveFileId = driveFileId;
+    reportEntry.fileType = process.env.PDFSHIFT_API_KEY ? 'pdf' : 'html';
+    reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+    reportEntry.thesisJson = thesis;
+    stats.completed++;
+    dbUpdate(reportEntry);
+  } catch (err) {
+    console.error('Post-generation failed for', reportEntry.name, ':', err.message);
+    reportEntry.status = 'failed';
+    reportEntry.error = err.message;
+    reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+    stats.failed++;
+    dbUpdate(reportEntry);
+  }
+}});
 
 function buildDriveHtml(name, t) {
   const today = new Date().toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
