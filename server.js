@@ -652,7 +652,7 @@ app.post('/send-report/:id', async (req, res) => {
 
     const firstName = data.name.split(' ')[0];
     await resend.emails.send({
-      from: process.env.RESEND_FROM || 'Kyle Mallien <reports@kylemallien.com>',
+      from: process.env.RESEND_FROM || 'Kyle Mallien <support@kylemallien.com>',
       to: email,
       subject: `${firstName}, your 100-Day Acquisition Roadmap is ready`,
       html: `
