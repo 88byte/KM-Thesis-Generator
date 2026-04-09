@@ -404,6 +404,207 @@ async function runGeneration(reportEntry, profile, system1, system2, profileBloc
   }
 }});
 
+function buildScreenHtml(name, t, submittedAt) {
+  const date = submittedAt ? submittedAt.toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' }) : new Date().toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+  const firstName = name.split(' ')[0];
+  const phaseConfig = [
+    {key:'days_1_30', letter:'F', days:'Days 1–30', name:'FIND — Build Your Pipeline'},
+    {key:'days_31_70', letter:'U', days:'Days 31–70', name:'UNDERWRITE — Qualify, Discover & Structure'},
+    {key:'days_71_100', letter:'E+L', days:'Days 71–100', name:'ELEVATE & LEGACY — Close, Integrate & Build Wealth'}
+  ];
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${name} — Acquisition Thesis</title>
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Montserrat:wght@400;500;600;700;800&family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--gold:#C9A84C;--gold-light:#E8C97A;--gold-dark:#8B6914;--black:#0E0E0E;--r-bg:#FDFAF4;--r-paper:#FFFFFF;--r-ink:#1A1714;--r-ink2:#4A4540;--r-rule:#E8E0D0;--r-gold:#8B6914}
+body{font-family:'Lora',Georgia,serif;background:var(--r-bg);color:var(--r-ink);line-height:1.75}
+
+/* cover */
+.cover{background:var(--black);padding:clamp(40px,6vw,80px) clamp(24px,5vw,64px) clamp(32px,5vw,56px);position:relative}
+.cover::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--gold),var(--gold-light),var(--gold),transparent)}
+.cover-eyebrow{font-family:'Montserrat',sans-serif;font-size:10px;letter-spacing:0.3em;text-transform:uppercase;color:var(--gold);margin-bottom:16px;opacity:0.75}
+.cover-name{font-family:'Lora',serif;font-size:clamp(28px,5vw,52px);font-weight:300;color:#F0EAD6;line-height:1.1;margin-bottom:6px}
+.cover-name span{background:linear-gradient(135deg,var(--gold-dark),var(--gold),var(--gold-light));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-weight:500}
+.cover-sub{font-family:'Lora',serif;font-size:clamp(14px,1.6vw,17px);color:rgba(240,234,214,0.5);font-style:italic;margin-bottom:28px}
+.cover-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:rgba(201,168,76,0.2);border:1px solid rgba(201,168,76,0.2);max-width:560px}
+@media(max-width:500px){.cover-metrics{grid-template-columns:repeat(2,1fr)}}
+.m-box{background:rgba(255,255,255,0.03);padding:16px 12px;text-align:center}
+.m-val{font-family:'Cinzel',serif;font-size:clamp(13px,1.8vw,18px);font-weight:600;color:var(--gold);display:block;margin-bottom:4px}
+.m-lbl{font-family:'Montserrat',sans-serif;font-size:8px;letter-spacing:0.15em;text-transform:uppercase;color:rgba(240,234,214,0.35)}
+.cover-fuel{font-family:'Montserrat',sans-serif;font-size:9px;letter-spacing:0.2em;color:rgba(201,168,76,0.3);text-transform:uppercase;margin-top:20px}
+
+/* toc */
+.toc{background:#F7F2E8;border-bottom:1px solid var(--r-rule);padding:clamp(24px,4vw,40px) clamp(24px,5vw,64px)}
+.toc-title{font-family:'Montserrat',sans-serif;font-size:9px;letter-spacing:0.3em;text-transform:uppercase;color:var(--r-gold);font-weight:700;margin-bottom:14px}
+.toc-row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--r-rule)}
+.toc-num{font-family:'Cinzel',serif;font-size:10px;color:var(--r-gold);font-weight:600;min-width:28px}
+.toc-lbl{font-family:'Montserrat',sans-serif;font-size:11px;color:var(--r-ink2);font-weight:500;letter-spacing:0.05em;text-transform:uppercase}
+
+/* body */
+.body{max-width:860px;margin:0 auto;padding:clamp(32px,5vw,56px) clamp(24px,5vw,56px)}
+.section{margin-bottom:48px}
+.sec-hdr{display:flex;align-items:center;gap:12px;margin-bottom:18px;padding-bottom:10px;border-bottom:1px solid var(--r-rule)}
+.sec-num{font-family:'Cinzel',serif;font-size:10px;color:var(--r-gold);font-weight:600;min-width:22px}
+.sec-title{font-family:'Montserrat',sans-serif;font-size:10px;letter-spacing:0.25em;text-transform:uppercase;color:var(--r-gold);font-weight:700}
+p{font-size:clamp(15px,1.6vw,17px);line-height:1.85;margin-bottom:14px;color:var(--r-ink)}
+strong{font-weight:600}
+
+/* criteria */
+.criteria{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--r-rule);border:1px solid var(--r-rule);margin:16px 0}
+@media(max-width:480px){.criteria{grid-template-columns:repeat(2,1fr)}}
+.c-cell{background:var(--r-paper);padding:14px;text-align:center}
+.c-val{font-family:'Cinzel',serif;font-size:clamp(13px,1.6vw,17px);font-weight:600;color:var(--r-gold);display:block;margin-bottom:3px}
+.c-lbl{font-family:'Montserrat',sans-serif;font-size:8px;letter-spacing:0.15em;text-transform:uppercase;color:#A09070}
+
+/* cards */
+.card{border:1px solid var(--r-rule);border-left:3px solid var(--gold);padding:14px 18px;margin:10px 0;background:var(--r-paper)}
+.card-title{font-family:'Montserrat',sans-serif;font-size:10px;font-weight:700;color:var(--r-gold);margin-bottom:6px;letter-spacing:0.05em}
+.card-body{font-size:clamp(14px,1.5vw,16px);line-height:1.78;color:var(--r-ink2)}
+
+/* tables */
+table{width:100%;border-collapse:collapse;margin:14px 0;font-family:'Montserrat',sans-serif;font-size:12px}
+thead th{background:#F0E8D5;padding:9px 12px;text-align:left;font-size:8px;letter-spacing:0.12em;text-transform:uppercase;color:var(--r-gold);font-weight:700;border-bottom:2px solid var(--r-rule)}
+tbody tr:nth-child(even) td{background:#FAFAF5}
+tbody tr:last-child td{background:#F5EDD8;font-weight:600;color:var(--r-gold)}
+td{padding:9px 12px;border-bottom:1px solid var(--r-rule);color:var(--r-ink);vertical-align:top;line-height:1.5}
+
+/* phases */
+.phase{border:1px solid var(--r-rule);margin-bottom:16px}
+.phase-hdr{background:#F0E8D5;padding:12px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--r-rule)}
+.phase-letter{font-family:'Cinzel',serif;font-size:22px;font-weight:700;color:var(--r-gold);line-height:1;min-width:28px}
+.phase-days{font-family:'Montserrat',sans-serif;font-size:7px;letter-spacing:0.18em;text-transform:uppercase;color:#A09070;font-weight:700}
+.phase-name{font-family:'Montserrat',sans-serif;font-size:10px;font-weight:700;color:var(--r-ink)}
+.phase-obj{padding:10px 16px;font-size:clamp(14px,1.5vw,16px);font-style:italic;color:var(--r-ink2);border-bottom:1px solid var(--r-rule);background:#FDFAF4}
+.phase table{margin:0}
+
+/* scripts */
+.script{border:1px solid var(--r-rule);margin-bottom:16px}
+.script-lbl{background:#F0E8D5;padding:8px 14px;font-family:'Montserrat',sans-serif;font-size:7.5px;letter-spacing:0.18em;text-transform:uppercase;color:var(--r-gold);font-weight:700;border-bottom:1px solid var(--r-rule)}
+.script-sub{padding:7px 14px;font-family:'Montserrat',sans-serif;font-size:11px;font-weight:600;color:var(--r-ink2);border-bottom:1px solid var(--r-rule);background:#FAFAF5}
+.script-sub span{color:var(--r-gold)}
+.script-body{padding:14px 16px;font-size:clamp(14px,1.5vw,16px);line-height:1.85;color:var(--r-ink);white-space:pre-wrap;word-wrap:break-word}
+
+/* closing */
+.closing{border-left:4px solid var(--gold);padding:16px 20px;background:#F5EDD8;margin:32px 0}
+.closing p{font-size:clamp(16px,1.8vw,19px);font-style:italic;line-height:1.75;margin:0}
+
+/* print bar */
+.print-bar{background:var(--black);padding:12px 24px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:10}
+.print-brand{font-family:'Cinzel',serif;font-size:12px;letter-spacing:0.1em;background:linear-gradient(135deg,var(--gold-dark),var(--gold));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-weight:600}
+.print-btn{font-family:'Montserrat',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;background:linear-gradient(135deg,var(--gold-dark),var(--gold));border:none;color:#000;padding:8px 16px;cursor:pointer;border-radius:2px}
+@media print{.print-bar{display:none}}
+</style></head><body>
+
+<div class="print-bar">
+  <div class="print-brand">Kyle Mallien · ${name}</div>
+  <button class="print-btn" onclick="window.print()">Print / Save PDF</button>
+</div>
+
+<div class="cover">
+  <div class="cover-eyebrow">Elite Wealth Club · Carlsbad · ${date}</div>
+  <div class="cover-name">${name}'s<br><span>100-Day Acquisition Roadmap</span></div>
+  <div class="cover-sub">Prepared exclusively for ${firstName} · Kyle Mallien · 2025–2026</div>
+  <div class="cover-metrics">
+    <div class="m-box"><span class="m-val">${t.metrics?.revenue||'—'}</span><div class="m-lbl">Revenue</div></div>
+    <div class="m-box"><span class="m-val">${t.metrics?.margin||'—'}</span><div class="m-lbl">Margin</div></div>
+    <div class="m-box"><span class="m-val">${t.metrics?.income||'—'}</span><div class="m-lbl">Income Goal</div></div>
+    <div class="m-box"><span class="m-val">${t.metrics?.timeline||'—'}</span><div class="m-lbl">Timeline</div></div>
+  </div>
+  <div class="cover-fuel">F · Find &nbsp; U · Underwrite &nbsp; E · Elevate &nbsp; L · Legacy</div>
+</div>
+
+<div class="toc">
+  <div class="toc-title">Table of Contents</div>
+  ${[['01','Thesis Overview'],['02','Acquisition Criteria'],['03','Your Unfair Advantages'],['04','Target Verticals — Ranked by Fit'],['05','100-Day Acquisition Roadmap'],['06','Outreach Scripts — Ready to Send'],['07','Deal Structure Framework'],['08','Valuation & Income Model'],['09','Post-Acquisition Value Creation'],['10','SBA 7(a) Financing Path'],['11','Key Milestones & Success Metrics'],['12','Immediate Next Steps']].map(([n,l])=>`<div class="toc-row"><span class="toc-num">${n}</span><span class="toc-lbl">${l}</span></div>`).join('')}
+</div>
+
+<div class="body">
+  <div class="section"><div class="sec-hdr"><span class="sec-num">01</span><span class="sec-title">Thesis Overview</span></div>${t.thesis_overview||''}</div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">02</span><span class="sec-title">Acquisition Criteria</span></div>
+    <p>Every deal must pass Kyle's buy box before an LOI is submitted.</p>
+    <div class="criteria">
+      <div class="c-cell"><span class="c-val">$1M–$5M</span><div class="c-lbl">Target Revenue</div></div>
+      <div class="c-cell"><span class="c-val">20–30%</span><div class="c-lbl">Profit Margins</div></div>
+      <div class="c-cell"><span class="c-val">10+ Years</span><div class="c-lbl">Operating History</div></div>
+      <div class="c-cell"><span class="c-val">10+ Staff</span><div class="c-lbl">Team in Place</div></div>
+      <div class="c-cell"><span class="c-val">SBA 7(a)</span><div class="c-lbl">Financing Path</div></div>
+      <div class="c-cell"><span class="c-val">Ages 58–70</span><div class="c-lbl">Seller Profile</div></div>
+    </div>
+  </div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">03</span><span class="sec-title">Your Unfair Advantages</span></div>
+    ${(t.unfair_advantages||[]).map(a=>`<div class="card"><div class="card-title">${a.title}</div><div class="card-body">${a.body}</div></div>`).join('')}
+  </div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">04</span><span class="sec-title">Target Verticals — Ranked by Fit</span></div>
+    <table><thead><tr><th>Rank</th><th>Vertical</th><th>Margin</th><th>Why It Fits</th></tr></thead><tbody>
+    ${(t.target_verticals||[]).map(v=>`<tr><td style="font-family:'Cinzel',serif;color:var(--r-gold);font-weight:600">#${v.rank}</td><td><strong>${v.vertical}</strong></td><td>${v.margin}</td><td>${v.why}</td></tr>`).join('')}
+    </tbody></table>
+  </div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">05</span><span class="sec-title">100-Day Acquisition Roadmap</span></div>
+    ${phaseConfig.map(p=>{const ph=(t.roadmap||{})[p.key];return ph?`<div class="phase">
+      <div class="phase-hdr"><div class="phase-letter">${p.letter}</div><div><div class="phase-days">${p.days}</div><div class="phase-name">${p.name}</div></div></div>
+      <div class="phase-obj">${ph.objective}</div>
+      <table><thead><tr><th style="width:110px">Days</th><th>Action</th></tr></thead><tbody>
+      ${(ph.actions||[]).map(a=>`<tr><td style="font-weight:600;color:var(--r-gold);white-space:nowrap">${a.days}</td><td>${a.action}</td></tr>`).join('')}
+      </tbody></table></div>`:''}).join('')}
+  </div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">06</span><span class="sec-title">Outreach Scripts — Ready to Send</span></div>
+    ${Object.values(t.scripts||{}).map(s=>`<div class="script">
+      <div class="script-lbl">${s.label}</div>
+      ${s.subject?`<div class="script-sub"><span>Subject:</span> ${s.subject}</div>`:''}
+      <div class="script-body">${s.body}</div>
+    </div>`).join('')}
+  </div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">07</span><span class="sec-title">Deal Structure Framework</span></div>
+    <table><thead><tr><th>Component</th><th>Target</th><th>Purpose</th></tr></thead><tbody>
+    ${(t.deal_structure||[]).map(d=>`<tr><td><strong>${d.component}</strong></td><td>${d.target}</td><td>${d.purpose}</td></tr>`).join('')}
+    </tbody></table>
+  </div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">08</span><span class="sec-title">Valuation &amp; Income Model</span></div>
+    <table><thead><tr><th>Revenue</th><th>EBITDA (20%)</th><th>EBITDA (25%)</th><th>Purchase @ 3x</th><th>Purchase @ 5x</th></tr></thead><tbody>
+    ${(t.valuation_model||[]).map(v=>`<tr><td>${v.revenue}</td><td>${v.ebitda_20}</td><td>${v.ebitda_25}</td><td>${v.at_3x}</td><td>${v.at_5x}</td></tr>`).join('')}
+    </tbody></table>
+  </div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">09</span><span class="sec-title">Post-Acquisition Value Creation</span></div>
+    ${(t.value_creation_levers||[]).map(l=>`<div class="card"><div class="card-title">${l.title}</div><div class="card-body">${l.body}</div></div>`).join('')}
+  </div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">10</span><span class="sec-title">SBA 7(a) Financing Path</span></div>
+    <p>Most acquisitions in the $1–5M range qualify with 10–20% down.</p>
+    <table><thead><tr><th>Deal Size</th><th>Down Payment (10%)</th><th>Seller Note (10%)</th><th>SBA Loan (80%)</th></tr></thead><tbody>
+    ${(t.sba_financing||[]).map(s=>`<tr><td>${s.deal_size}</td><td>${s.down_10}</td><td>${s.seller_note_10}</td><td>${s.sba_80}</td></tr>`).join('')}
+    </tbody></table>
+  </div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">11</span><span class="sec-title">Key Milestones &amp; Success Metrics</span></div>
+    <table><thead><tr><th style="width:70px">Day</th><th>Milestone</th></tr></thead><tbody>
+    ${(t.milestones||[]).map(m=>`<tr><td style="font-weight:600;color:var(--r-gold);white-space:nowrap">${m.day}</td><td>${m.milestone}</td></tr>`).join('')}
+    </tbody></table>
+  </div>
+
+  <div class="section"><div class="sec-hdr"><span class="sec-num">12</span><span class="sec-title">Immediate Next Steps</span></div>
+    <table><thead><tr><th style="width:80px">Timeframe</th><th>Action</th></tr></thead><tbody>
+    ${(t.next_steps||[]).map(n=>`<tr><td style="font-weight:600;color:var(--r-gold);white-space:nowrap">${n.timeframe}</td><td>${n.action}</td></tr>`).join('')}
+    </tbody></table>
+  </div>
+
+  <div class="closing"><p>${t.closing_insight||''}</p></div>
+
+  <p style="text-align:center;font-family:'Montserrat',sans-serif;font-size:9px;color:#B0A890;letter-spacing:0.1em;margin-top:40px;padding-top:16px;border-top:1px solid var(--r-rule)">
+    Confidential · Prepared Exclusively for ${name} · Kyle Mallien · kylemallien.com · ${date}
+  </p>
+</div>
+</body></html>`;
+}
+
 function buildDriveHtml(name, t) {
   const today = new Date().toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
   const phaseConfig = [
@@ -603,12 +804,10 @@ app.get('/view/:id', async (req, res) => {
     .single();
 
   if (error || !data) return res.status(404).send('<h2>Report not found</h2>');
-  if (!data.thesis_json) return res.status(400).send('<h2>No thesis data stored for this report</h2>');
+  if (!data.thesis_json) return res.status(400).send('<h2>No thesis data stored for this report — was generated before Supabase integration</h2>');
 
-  // Return the full styled HTML report
-  const html = buildDriveHtml(data.name, data.thesis_json);
   res.setHeader('Content-Type', 'text/html');
-  res.send(html);
+  res.send(buildScreenHtml(data.name, data.thesis_json, new Date(data.submitted_at)));
 });
 
 // ── Admin: Send report by email ──────────────────────────────────────────────
