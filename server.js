@@ -1,4 +1,5 @@
 import express from 'express';
+import { Resend } from 'resend';
 import { createClient } from '@supabase/supabase-js';
 import { jsonrepair } from 'jsonrepair';
 import cors from 'cors';
@@ -19,6 +20,8 @@ app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+
 // ── Supabase ──────────────────────────────────────────────────────────────────
 const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY)
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
@@ -29,7 +32,8 @@ async function dbInsert(entry) {
   const { data, error } = await supabase.from('submissions').insert({
     name:          entry.name,
     submitted_at:  entry.submittedAt,
-    status:        entry.status
+    status:        entry.status,
+    event_tag:     entry.eventTag
   }).select('id').single();
   if (error) { console.error('Supabase insert error:', error.message); return null; }
   entry.dbId = data.id;
@@ -77,6 +81,9 @@ async function seedFromSupabase() {
     durationMs:   r.duration_ms,
     driveFileId:  r.drive_file_id,
     thesisJson:   r.thesis_json || null,
+    eventTag:     r.event_tag    || null,
+    email:        r.email        || null,
+    emailSentAt:  r.email_sent_at|| null,
     error:        r.error
   }));
   console.log(`Seeded ${data.length} submissions from Supabase (${stats.completed} complete, ${stats.failed} failed)`);
@@ -112,7 +119,9 @@ const stats = {
 
 function recordSubmission(name) {
   stats.submitted++;
-  const entry = { dbId: null, name, submittedAt: new Date(), status: 'queued', driveFileId: null, fileType: null, durationMs: null, error: null };
+  const d = new Date();
+  const eventTag = d.toLocaleString('en-US', { month: 'long', year: 'numeric' }).toUpperCase();
+  const entry = { dbId: null, name, submittedAt: d, eventTag, status: 'queued', email: null, emailSentAt: null, driveFileId: null, fileType: null, durationMs: null, error: null };
   stats.reports.unshift(entry);
   if (stats.reports.length > 200) stats.reports.pop();
   dbInsert(entry); // fire-and-forget — doesn't block the response
@@ -534,7 +543,8 @@ app.get('/stats', (req, res) => {
       uptimeSeconds: Math.floor((Date.now() - SERVER_START) / 1000),
       driveConfigured: !!(process.env.GOOGLE_DRIVE_FOLDER_ID),
       pdfshiftConfigured: !!(process.env.PDFSHIFT_API_KEY),
-      supabaseConfigured: !!(supabase)
+      supabaseConfigured: !!(supabase),
+      resendConfigured: !!(resend)
     },
     queue: {
       active: activeCount,
@@ -610,11 +620,130 @@ app.get('/view/:id', async (req, res) => {
   res.send(html);
 });
 
+// ── Admin: Send report by email ──────────────────────────────────────────────
+app.post('/send-report/:id', async (req, res) => {
+  const key = req.query.key || req.headers['x-admin-key'];
+  if (!process.env.ADMIN_KEY || key !== process.env.ADMIN_KEY)
+    return res.status(401).json({ error: 'Unauthorized' });
+  if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+  if (!resend)   return res.status(503).json({ error: 'Resend not configured — add RESEND_API_KEY' });
+
+  const { email } = req.body;
+  if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
+
+  const { data, error } = await supabase
+    .from('submissions').select('id, name, thesis_json, file_type').eq('id', req.params.id).single();
+
+  if (error || !data) return res.status(404).json({ error: 'Submission not found' });
+  if (!data.thesis_json) return res.status(400).json({ error: 'No thesis JSON stored — report predates Supabase integration' });
+
+  try {
+    console.log('Sending report to', email, 'for', data.name);
+
+    // Generate the PDF/HTML for attachment
+    const driveHtml = buildDriveHtml(data.name, data.thesis_json);
+    let attachContent, attachType, attachName;
+
+    if (process.env.PDFSHIFT_API_KEY) {
+      const pdfBuffer = await htmlToPdf(driveHtml);
+      if (pdfBuffer) {
+        attachContent = pdfBuffer.toString('base64');
+        attachType = 'application/pdf';
+        attachName = `${data.name.replace(/\s+/g,'_')}_Acquisition_Thesis.pdf`;
+      }
+    }
+
+    if (!attachContent) {
+      attachContent = Buffer.from(driveHtml).toString('base64');
+      attachType = 'text/html';
+      attachName = `${data.name.replace(/\s+/g,'_')}_Acquisition_Thesis.html`;
+    }
+
+    const firstName = data.name.split(' ')[0];
+    await resend.emails.send({
+      from: process.env.RESEND_FROM || 'Kyle Mallien <reports@kylemallien.com>',
+      to: email,
+      subject: `${firstName}, your 100-Day Acquisition Roadmap is ready`,
+      html: `
+        <div style="font-family:Georgia,serif;max-width:600px;margin:0 auto;padding:40px 24px;color:#1A1714">
+          <p style="font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:#8B6914;margin-bottom:16px">Kyle Mallien · Elite Wealth Club</p>
+          <h1 style="font-size:28px;font-weight:400;margin-bottom:16px;line-height:1.2">${firstName}, your Acquisition Thesis is ready.</h1>
+          <p style="font-size:16px;line-height:1.8;color:#3A3530;margin-bottom:20px">Your personalized 100-Day Acquisition Roadmap is attached. It includes your target verticals, outreach scripts, deal structure, valuation model, and your full F.U.E.L. playbook — all built specifically around your background and goals.</p>
+          <p style="font-size:16px;line-height:1.8;color:#3A3530;margin-bottom:32px">Kyle will walk through this with you personally. In the meantime, review Section 06 — your outreach scripts are ready to use.</p>
+          <hr style="border:none;border-top:1px solid #E8E0D0;margin:32px 0"/>
+          <p style="font-size:13px;color:#8B6914;font-style:italic">Kyle Mallien · Business Acquisition Strategist<br>kylemallien.com</p>
+        </div>`,
+      attachments: [{ filename: attachName, content: attachContent }]
+    });
+
+    // Save email + timestamp to Supabase
+    await supabase.from('submissions').update({
+      email,
+      email_sent_at: new Date().toISOString()
+    }).eq('id', data.id);
+
+    // Update in-memory
+    const inMem = stats.reports.find(r => r.dbId === data.id);
+    if (inMem) { inMem.email = email; inMem.emailSentAt = new Date(); }
+
+    res.json({ ok: true, email, name: data.name });
+  } catch (err) {
+    console.error('Send report failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Admin: Bulk regenerate ────────────────────────────────────────────────────
+app.post('/regenerate-bulk', async (req, res) => {
+  const key = req.query.key || req.headers['x-admin-key'];
+  if (!process.env.ADMIN_KEY || key !== process.env.ADMIN_KEY)
+    return res.status(401).json({ error: 'Unauthorized' });
+  if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0)
+    return res.status(400).json({ error: 'ids array required' });
+
+  // Respond immediately — regeneration happens in background
+  res.json({ ok: true, queued: ids.length, message: `Queued ${ids.length} report(s) for regeneration` });
+
+  // Process sequentially in background through the existing slot queue
+  (async () => {
+    console.log(`Bulk regenerate: ${ids.length} reports queued`);
+    for (const id of ids) {
+      try {
+        const { data, error } = await supabase
+          .from('submissions').select('id, name, thesis_json').eq('id', id).single();
+        if (error || !data || !data.thesis_json) {
+          console.log(`Bulk regen skip ${id}: no thesis JSON`); continue;
+        }
+        await acquireSlot();
+        try {
+          console.log('Bulk regen:', data.name);
+          const driveHtml = buildDriveHtml(data.name, data.thesis_json);
+          const driveFileId = await saveThesisToDrive(data.name, driveHtml);
+          await supabase.from('submissions').update({ drive_file_id: driveFileId }).eq('id', data.id);
+          const inMem = stats.reports.find(r => r.dbId === data.id);
+          if (inMem) inMem.driveFileId = driveFileId;
+          console.log('Bulk regen complete:', data.name);
+        } finally {
+          releaseSlot();
+        }
+      } catch (err) {
+        console.error('Bulk regen error for', id, ':', err.message);
+      }
+    }
+    console.log('Bulk regenerate finished');
+  })();
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
   console.log('Kyle Mallien Thesis API running on port', PORT);
   console.log('ANTHROPIC_API_KEY:', process.env.ANTHROPIC_API_KEY ? 'SET' : 'MISSING');
   console.log('Google Drive:     ', process.env.GOOGLE_DRIVE_FOLDER_ID ? 'configured' : 'not configured');
   console.log('Supabase:         ', supabase ? 'configured' : 'not configured — stats will not persist');
+  console.log('Resend:           ', resend  ? 'configured' : 'not configured — email delivery unavailable');
+  console.log('Resend:           ', resend ? 'configured' : 'not configured — email delivery unavailable');
   if (supabase) await seedFromSupabase();
 });
