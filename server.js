@@ -387,7 +387,7 @@ async function runGeneration(reportEntry, profile, system1, system2, profileBloc
     stats.failed++;
     dbUpdate(reportEntry);
   }
-}});
+}
 
 function buildScreenHtml(name, t, submittedAt) {
   const date = submittedAt ? submittedAt.toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' }) : new Date().toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
