@@ -389,6 +389,13 @@ async function runGeneration(reportEntry, profile, system1, system2, profileBloc
       reportEntry.fileType = process.env.PDFSHIFT_API_KEY ? 'pdf' : 'html';
       reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
       reportEntry.thesisJson = thesis;
+      // If this was a retry of a failed entry, correct the failed counter
+      if (reportEntry.wasRetryOf === 'failed') {
+        stats.failed = Math.max(0, stats.failed - 1);
+      } else if (reportEntry.wasRetryOf === 'complete') {
+        stats.completed = Math.max(0, stats.completed - 1);
+      }
+      reportEntry.wasRetryOf = null;
       stats.completed++;
       dbUpdate(reportEntry);
       return; // success
@@ -792,6 +799,9 @@ app.post('/retry/:id', async (req, res) => {
     };
     stats.reports.unshift(entry);
   } else {
+    // Mark that this was a retry of a previously failed/complete entry
+    // Counters only adjust after generation actually succeeds (in runGeneration)
+    entry.wasRetryOf = entry.status; // remember previous status for counter correction
     entry.status = 'queued';
     entry.error = null;
     entry.startedAt = null;
