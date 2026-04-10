@@ -758,6 +758,78 @@ app.get('/stats', (req, res) => {
   });
 });
 
+// ── Admin: Retry failed generation from stored profile ───────────────────────
+app.post('/retry/:id', async (req, res) => {
+  const key = req.query.key || req.headers['x-admin-key'];
+  if (!process.env.ADMIN_KEY || key !== process.env.ADMIN_KEY)
+    return res.status(401).json({ error: 'Unauthorized' });
+  if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+  const { data, error } = await supabase
+    .from('submissions')
+    .select('id, name, status, profile_json')
+    .eq('id', req.params.id)
+    .single();
+
+  if (error || !data) return res.status(404).json({ error: 'Submission not found' });
+  if (!data.profile_json) return res.status(400).json({ error: 'No profile data stored — submission predates this feature. Person needs to resubmit.' });
+
+  // Reset status to queued in DB and memory
+  await supabase.from('submissions').update({
+    status: 'queued', error: null, started_at: null, completed_at: null,
+    drive_file_id: null, file_type: null, duration_ms: null, thesis_json: null
+  }).eq('id', data.id);
+
+  // Find or create in-memory entry
+  let entry = stats.reports.find(r => r.dbId === data.id);
+  if (!entry) {
+    stats.submitted++;
+    entry = {
+      dbId: data.id, name: data.name, submittedAt: new Date(),
+      eventTag: null, profileJson: data.profile_json, status: 'queued',
+      email: null, emailSentAt: null, driveFileId: null, fileType: null,
+      durationMs: null, thesisJson: null, error: null
+    };
+    stats.reports.unshift(entry);
+  } else {
+    entry.status = 'queued';
+    entry.error = null;
+    entry.startedAt = null;
+    entry.completedAt = null;
+    entry.driveFileId = null;
+    entry.thesisJson = null;
+    entry.durationMs = null;
+  }
+
+  // Respond immediately — generation runs in background
+  res.json({ ok: true, queued: true, name: data.name, message: 'Re-queued for generation' });
+
+  // Re-run full generation using stored profile
+  const p = data.profile_json;
+  const firstName = p.name.split(' ')[0];
+  const baseInstruction = `You are Kyle Mallien's senior acquisition strategist. Kyle is an INC 5000 entrepreneur and acquisition mentor. His methodology: F.U.E.L. (Find, Underwrite, Elevate, Legacy). Buy box: service-based, recession-proof, 10+ years operating, 10+ employees, $1M–$5M revenue, 20%+ margins, SBA 7(a), retiring founder ages 58–70. Return ONLY raw JSON — no markdown, no backticks, no preamble. Be hyper-specific to ${firstName}'s profile in every field.`;
+  const { system1, system2 } = buildPrompts(firstName, baseInstruction);
+  const profileBlock = [
+    `Name: ${p.name}`,
+    `Profession: ${p.profession}`,
+    `Location: ${p.location}`,
+    `Capital Available: ${p.capital}`,
+    `Income Goal: ${p.income}`,
+    `Unique Edge: ${p.edge}`,
+    `Business Ownership History: ${p.owned}`,
+    `Target Categories: ${(p.categories||[]).join(', ')}`,
+    `Timeline: ${p.timeline}`,
+    `Debt Comfort: ${p.debt}`,
+    `Geographic Focus: ${p.geo}`,
+    `Motivation: ${p.motivation}`,
+    `Biggest Obstacle: ${p.obstacle}`,
+    p.extras ? `Additional Notes: ${p.extras}` : ''
+  ].filter(Boolean).join('\n');
+
+  console.log(`Retrying full generation for ${data.name} (id: ${data.id})`);
+  runGeneration(entry, p, system1, system2, profileBlock);
+});
+
 // ── Admin: Regenerate PDF ────────────────────────────────────────────────────
 app.post('/regenerate/:id', async (req, res) => {
   const key = req.query.key || req.headers['x-admin-key'];
