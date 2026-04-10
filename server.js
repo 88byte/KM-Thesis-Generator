@@ -145,10 +145,22 @@ const stats = {
   reports: [] // last 200 kept in memory
 };
 
+function sanitizeName(name) {
+  // Replace characters that can break Claude JSON output
+  return name.replace(/&/g, 'and').replace(/[<>]/g, '').trim();
+}
+
 function recordSubmission(name, profile) {
   stats.submitted++;
   const d = new Date();
   const eventTag = d.toLocaleString('en-US', { month: 'long', year: 'numeric' }).toUpperCase();
+  // Sanitize name to prevent JSON generation failures from special characters
+  const safeName = sanitizeName(name);
+  if (safeName !== name) {
+    console.log(`Name sanitized: "${name}" → "${safeName}"`);
+    profile = { ...profile, name: safeName };
+    name = safeName;
+  }
   const entry = { dbId: null, name, submittedAt: d, eventTag, profileJson: profile, status: 'queued', email: null, emailSentAt: null, driveFileId: null, fileType: null, durationMs: null, error: null };
   stats.reports.unshift(entry);
   if (stats.reports.length > 200) stats.reports.pop();
@@ -345,7 +357,6 @@ async function runGeneration(reportEntry, profile, system1, system2, profileBloc
         callClaude(system2, `Generate Call 2 JSON for this attendee:\n\n${profileBlock}`)
       ]);
       releaseSlot();
-      break;
     } catch (err) {
       releaseSlot();
       const isRateLimit = err.status === 429 || (err.message && err.message.includes('rate'));
@@ -353,39 +364,48 @@ async function runGeneration(reportEntry, profile, system1, system2, profileBloc
         const wait = RETRY_DELAY_MS * attempt;
         console.log(`Rate limited for ${reportEntry.name} — retrying in ${wait/1000}s (attempt ${attempt}/${RETRY_ATTEMPTS})`);
         await new Promise(r => setTimeout(r, wait));
-      } else {
-        console.error(`Generation failed for ${reportEntry.name} after ${attempt} attempt(s):`, err.message);
-        reportEntry.status = 'failed';
-        reportEntry.error = err.message;
-        reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
-        stats.failed++;
-        dbUpdate(reportEntry);
-        return;
+        continue;
       }
+      console.error(`API call failed for ${reportEntry.name} after ${attempt} attempt(s):`, err.message);
+      reportEntry.status = 'failed';
+      reportEntry.error = err.message;
+      reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+      stats.failed++;
+      dbUpdate(reportEntry);
+      return;
     }
-  }
-  try {
-    const part1 = safeParseJSON(raw1);
-    const part2 = safeParseJSON(raw2);
-    const thesis = { ...part1, ...part2 };
-    console.log('Thesis generated for', reportEntry.name);
-    const driveHtml = buildDriveHtml(reportEntry.name, thesis);
-    const driveFileId = await saveThesisToDrive(reportEntry.name, driveHtml);
-    reportEntry.status = 'complete';
-    reportEntry.completedAt = new Date();
-    reportEntry.driveFileId = driveFileId;
-    reportEntry.fileType = process.env.PDFSHIFT_API_KEY ? 'pdf' : 'html';
-    reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
-    reportEntry.thesisJson = thesis;
-    stats.completed++;
-    dbUpdate(reportEntry);
-  } catch (err) {
-    console.error('Post-generation failed for', reportEntry.name, ':', err.message);
-    reportEntry.status = 'failed';
-    reportEntry.error = err.message;
-    reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
-    stats.failed++;
-    dbUpdate(reportEntry);
+
+    // Try to parse — bad JSON retries the whole Claude call
+    try {
+      const part1 = safeParseJSON(raw1);
+      const part2 = safeParseJSON(raw2);
+      const thesis = { ...part1, ...part2 };
+      console.log('Thesis generated for', reportEntry.name);
+      const driveHtml = buildDriveHtml(reportEntry.name, thesis);
+      const driveFileId = await saveThesisToDrive(reportEntry.name, driveHtml);
+      reportEntry.status = 'complete';
+      reportEntry.completedAt = new Date();
+      reportEntry.driveFileId = driveFileId;
+      reportEntry.fileType = process.env.PDFSHIFT_API_KEY ? 'pdf' : 'html';
+      reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+      reportEntry.thesisJson = thesis;
+      stats.completed++;
+      dbUpdate(reportEntry);
+      return; // success
+    } catch (parseErr) {
+      if (attempt < RETRY_ATTEMPTS) {
+        console.warn(`JSON parse failed for ${reportEntry.name} (attempt ${attempt}/${RETRY_ATTEMPTS}) — retrying. Error: ${parseErr.message.slice(0,80)}`);
+        await new Promise(r => setTimeout(r, 5000)); // brief pause before retry
+        continue;
+      }
+      console.error(`JSON parse failed for ${reportEntry.name} after all ${RETRY_ATTEMPTS} attempts:`, parseErr.message);
+      reportEntry.status = 'failed';
+      reportEntry.error = 'JSON parse failed after retries: ' + parseErr.message.slice(0, 100);
+      reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+      stats.failed++;
+      dbUpdate(reportEntry);
+      return;
+    }
   }
 }
 
