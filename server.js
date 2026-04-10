@@ -169,10 +169,43 @@ function recordSubmission(name, profile) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function safeParseJSON(raw) {
-  const clean = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-  try { return JSON.parse(jsonrepair(clean)); }
-  catch (e) { console.error('JSON repair failed:', e.message.slice(0, 100)); throw e; }
+function preprocessJson(raw) {
+  // Strip markdown code fences
+  let s = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+
+  // Claude sometimes writes arrays where the schema expects a plain string.
+  // Flatten single-element arrays: "field": ["value"] → "field": "value"
+  s = s.replace(/:\s*\[\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*\]/g, ': "$1"');
+
+  // Claude sometimes writes [Placeholder Text] inside string values which is fine,
+  // but occasionally puts them outside quotes. Wrap any bare [...] that follow a colon.
+  s = s.replace(/:\s*(\[[^\]"\n]{1,80}\])(?=[,\n}])/g, (m, bracket) => `: "${bracket.replace(/"/g, '\\"')}"`);
+
+  // Fix literal newlines inside string values (between quotes, not escaped)
+  s = s.replace(/"((?:[^"\\]|\\.)*)"/g, (match) => {
+    // Replace unescaped newlines inside the string
+    return match.replace(/(?<!\\)\n/g, '\\n').replace(/(?<!\\)\r/g, '');
+  });
+
+  return s;
+}
+
+function safeParseJSON(raw, label) {
+  const clean = preprocessJson(raw);
+  try {
+    return JSON.parse(jsonrepair(clean));
+  } catch (e) {
+    // Log the raw content around the error position to help diagnose
+    const pos = parseInt((e.message.match(/position (\d+)/) || [])[1] || '0');
+    if (pos > 0) {
+      const snippet = raw.slice(Math.max(0, pos - 100), pos + 150);
+      console.error(`JSON repair failed [${label || '?'}] at pos ${pos}:`, e.message.slice(0, 80));
+      console.error('  Raw around error:', JSON.stringify(snippet));
+    } else {
+      console.error('JSON repair failed:', e.message.slice(0, 100));
+    }
+    throw e;
+  }
 }
 
 async function callClaude(system, user) {
@@ -375,10 +408,42 @@ async function runGeneration(reportEntry, profile, system1, system2, profileBloc
       return;
     }
 
-    // Try to parse — bad JSON retries the whole Claude call
+    // Parse each call independently — only retry the failing call
+    let part1 = null, part2 = null;
+    let parseFailedCall = null;
+    try { part1 = safeParseJSON(raw1, `${reportEntry.name} call1 attempt${attempt}`); }
+    catch (e) {
+      parseFailedCall = 1;
+    }
+    try { part2 = safeParseJSON(raw2, `${reportEntry.name} call2 attempt${attempt}`); }
+    catch (e) {
+      if (!parseFailedCall) parseFailedCall = 2;
+      else parseFailedCall = 'both';
+    }
+
+    if (parseFailedCall !== null) {
+      if (attempt < RETRY_ATTEMPTS) {
+        console.warn(`JSON parse failed (call ${parseFailedCall}) for ${reportEntry.name} — retrying only failing call (attempt ${attempt+1}/${RETRY_ATTEMPTS})`);
+        await new Promise(r => setTimeout(r, 5000));
+        // Only redo the call(s) that failed — preserve the good result
+        if (parseFailedCall === 1 || parseFailedCall === 'both') {
+          raw1 = await callClaude(system1, `Generate Call 1 JSON for this attendee:\n\n${profileBlock}`).catch(() => raw1);
+        }
+        if (parseFailedCall === 2 || parseFailedCall === 'both') {
+          raw2 = await callClaude(system2, `Generate Call 2 JSON for this attendee:\n\n${profileBlock}`).catch(() => raw2);
+        }
+        continue;
+      }
+      console.error(`JSON parse failed for ${reportEntry.name} after all ${RETRY_ATTEMPTS} attempts (call ${parseFailedCall})`);
+      reportEntry.status = 'failed';
+      reportEntry.error = `JSON parse failed on call ${parseFailedCall} after ${RETRY_ATTEMPTS} retries`;
+      reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
+      stats.failed++;
+      dbUpdate(reportEntry);
+      return;
+    }
+
     try {
-      const part1 = safeParseJSON(raw1);
-      const part2 = safeParseJSON(raw2);
       const thesis = { ...part1, ...part2 };
       console.log('Thesis generated for', reportEntry.name);
       const driveHtml = buildDriveHtml(reportEntry.name, thesis);
@@ -399,15 +464,10 @@ async function runGeneration(reportEntry, profile, system1, system2, profileBloc
       stats.completed++;
       dbUpdate(reportEntry);
       return; // success
-    } catch (parseErr) {
-      if (attempt < RETRY_ATTEMPTS) {
-        console.warn(`JSON parse failed for ${reportEntry.name} (attempt ${attempt}/${RETRY_ATTEMPTS}) — retrying. Error: ${parseErr.message.slice(0,80)}`);
-        await new Promise(r => setTimeout(r, 5000)); // brief pause before retry
-        continue;
-      }
-      console.error(`JSON parse failed for ${reportEntry.name} after all ${RETRY_ATTEMPTS} attempts:`, parseErr.message);
+    } catch (driveErr) {
+      console.error('Drive/build failed for', reportEntry.name, ':', driveErr.message);
       reportEntry.status = 'failed';
-      reportEntry.error = 'JSON parse failed after retries: ' + parseErr.message.slice(0, 100);
+      reportEntry.error = driveErr.message;
       reportEntry.durationMs = reportEntry.startedAt ? Date.now() - reportEntry.startedAt : null;
       stats.failed++;
       dbUpdate(reportEntry);
